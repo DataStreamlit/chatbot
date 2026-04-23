@@ -47,19 +47,7 @@ st.markdown("""
     border-bottom: 2px solid rgba(128,128,128,0.25);
     padding-bottom: 0;
   }
-  .stTabs [data-baseweb="tab"] {
-    font-size: 0.88rem;
-    font-weight: 500;
-    padding: 8px 16px;
-    border-radius: 6px 6px 0 0;
-    border: 1px solid transparent;
-    color: inherit;
-    background-color: rgba(128,128,128,0.08);
-  }
-  .stTabs [data-baseweb="tab"]:hover {
-    background-color: rgba(128,128,128,0.18);
-    border-color: rgba(128,128,128,0.25);
-  }
+
   .stTabs [aria-selected="true"] {
     background-color: rgba(29,158,117,0.15) !important;
     border-color: #1D9E75 !important;
