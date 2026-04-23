@@ -1272,7 +1272,11 @@ with tab7:
         except Exception:
             return ""
 
-    styled = summary_df.style.applymap(style_pct, subset=["% Surg Performed"])
+    # Use .map() (pandas >= 2.1) with fallback to .applymap() for older versions
+    try:
+        styled = summary_df.style.map(style_pct, subset=["% Surg Performed"])
+    except AttributeError:
+        styled = summary_df.style.applymap(style_pct, subset=["% Surg Performed"])
     st.dataframe(styled, use_container_width=True, height=480)
 
     st.markdown("---")
