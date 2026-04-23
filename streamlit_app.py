@@ -23,7 +23,6 @@ else:
 # ── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="OR Performance Dashboard",
-    page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -47,7 +46,19 @@ st.markdown("""
     border-bottom: 2px solid rgba(128,128,128,0.25);
     padding-bottom: 0;
   }
-
+  .stTabs [data-baseweb="tab"] {
+    font-size: 0.88rem;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 6px 6px 0 0;
+    border: 1px solid transparent;
+    color: inherit;
+    background-color: rgba(128,128,128,0.08);
+  }
+  .stTabs [data-baseweb="tab"]:hover {
+    background-color: rgba(128,128,128,0.18);
+    border-color: rgba(128,128,128,0.25);
+  }
   .stTabs [aria-selected="true"] {
     background-color: rgba(29,158,117,0.15) !important;
     border-color: #1D9E75 !important;
@@ -162,7 +173,7 @@ def filter_df(df, dirs, specs, statuses):
 
 # ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("🏥 OR Dashboard")
+    st.title("OR Dashboard")
     st.markdown("---")
 
     st.subheader("File 1 — Primary")
@@ -231,17 +242,23 @@ else:
     comparing = False
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ADD SPACE BEFORE TABS  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 if comparing:
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Overview", "⏳ Waiting List", "🔪 Surgical Activity",
-        "🏨 OR Rooms", "🔍 Hospital Explorer", "⚖️ File Comparison",
+        "Overview", "Waiting List", "Surgical Activity",
+        "OR Rooms", "Hospital Explorer", " File Comparison",
     ])
 else:
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Overview", "⏳ Waiting List", "🔪 Surgical Activity",
-        "🏨 OR Rooms", "🔍 Hospital Explorer",
+        "Overview", "Waiting List", "Surgical Activity",
+        "OR Rooms", "Hospital Explorer",
     ])
     tab6 = None
 
@@ -813,4 +830,3 @@ if comparing and tab6 is not None:
             [f"Δ {c}" for c in ["WL","Surgeries","Elective","Days"]]
         )
         st.dataframe(tm_show.reset_index(drop=True), use_container_width=True, height=400)
-
