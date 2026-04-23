@@ -74,6 +74,53 @@ st.markdown("""
   .stTabs [data-baseweb="tab-panel"] {
     padding-top: 1rem;
   }
+
+  /* ── Weekly-Executive section headers ── */
+  .exec-section {
+    background: linear-gradient(90deg, rgba(29,158,117,0.12) 0%, rgba(29,158,117,0.02) 100%);
+    border-left: 4px solid #1D9E75;
+    padding: 6px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 18px 0 10px 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .exec-section-amber {
+    background: linear-gradient(90deg, rgba(239,159,39,0.12) 0%, rgba(239,159,39,0.02) 100%);
+    border-left: 4px solid #EF9F27;
+    padding: 6px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 18px 0 10px 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .exec-section-blue {
+    background: linear-gradient(90deg, rgba(55,138,221,0.12) 0%, rgba(55,138,221,0.02) 100%);
+    border-left: 4px solid #378ADD;
+    padding: 6px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 18px 0 10px 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .exec-section-coral {
+    background: linear-gradient(90deg, rgba(216,90,48,0.12) 0%, rgba(216,90,48,0.02) 100%);
+    border-left: 4px solid #D85A30;
+    padding: 6px 14px;
+    border-radius: 0 6px 6px 0;
+    margin: 18px 0 10px 0;
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  .placeholder-box {
+    background: rgba(239,159,39,0.08);
+    border: 1px dashed #EF9F27;
+    border-radius: 6px;
+    padding: 8px 14px;
+    color: #b07a00;
+    font-size: 0.85rem;
+    margin: 4px 0;
+  }
 </style>
 """, unsafe_allow_html=True)
 
@@ -196,7 +243,7 @@ with st.sidebar:
         st.success(f"✓ File 1 loaded — {len(df1_raw):,} rows")
     else:
         try:
-            df1_raw = load_path("Aggregated_-_Specialty_level____1_.xlsx")
+            df1_raw = load_path("Aggregated_Specialty_Level.xlsx")
             label1  = "Default aggregated file"
             st.info("File 1: using default file in same folder.")
         except Exception:
@@ -242,7 +289,7 @@ else:
     comparing = False
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ADD SPACE BEFORE TABS  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# ADD SPACE BEFORE TABS
 # ══════════════════════════════════════════════════════════════════════════════
 st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
 
@@ -251,14 +298,27 @@ st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
 # TABS
 # ══════════════════════════════════════════════════════════════════════════════
 if comparing:
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "Overview", "Waiting List", "Surgical Activity",
-        "OR Rooms", "Hospital Explorer", " File Comparison",
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+        "Overview",
+        "Waiting List",
+        "Surgical Activity",
+        "OR Rooms",
+        "Hospital Explorer",
+        "File Comparison",
+        "Weekly-Executive",
+        "Weekly-Specialty",
+        "High Level Table",
     ])
 else:
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Overview", "Waiting List", "Surgical Activity",
-        "OR Rooms", "Hospital Explorer",
+    tab1, tab2, tab3, tab4, tab5, tab7, tab8, tab9 = st.tabs([
+        "Overview",
+        "Waiting List",
+        "Surgical Activity",
+        "OR Rooms",
+        "Hospital Explorer",
+        "Weekly-Executive",
+        "Weekly-Specialty",
+        "High Level Table",
     ])
     tab6 = None
 
@@ -830,3 +890,821 @@ if comparing and tab6 is not None:
             [f"Δ {c}" for c in ["WL","Surgeries","Elective","Days"]]
         )
         st.dataframe(tm_show.reset_index(drop=True), use_container_width=True, height=400)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — WEEKLY EXECUTIVE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab7:
+    st.header("Weekly Executive Report")
+    st.caption("All KPIs are derived from the uploaded primary file (File 1 — Primary Upload). "
+               "Formulas follow the OR Report Database definitions.")
+
+    # ── Working dataset: available specialties only ───────────────────────────
+    df = avail1.copy()
+
+    # ── Helper: get specialty rows (handles naming variants) ─────────────────
+    SPEC_MAP = {
+        "Ophthalmology":                  ["Ophthalmology","Ophthlamology","Opthalmology"],
+        "Orthopedics":                    ["Orthopedics","Orthopedics Surgery","Orthopaedics"],
+        "Pediatrics":                     ["Pediatrics","Pediatrics Surgery","Paediatrics"],
+        "General Surgery":                ["General Surgery"],
+        "Bariatric Surgery":              ["Bariatric Surgery"],
+        "Plastic Surgery":                ["Plastic Surgery"],
+        "ENT Surgery - Otolaryngology":   ["ENT Surgery - Otolaryngology","ENT Surgery","Otolaryngology"],
+        "Urology":                        ["Urology"],
+        "Dentistry":                      ["Dentistry"],
+        "Vascular Surgery":               ["Vascular Surgery"],
+        "Obstetrics & Gynecology":        ["Obstetrics & Gynecology","Obstetrics and Gynecology","OB/GYN"],
+        "Neurosurgery":                   ["Neurosurgery"],
+        "Oral Surgery":                   ["Oral Surgery"],
+        "Cardiothoracic Surgery":         ["Cardiothoracic Surgery"],
+    }
+
+    def get_spec(df_src, canonical):
+        variants = SPEC_MAP.get(canonical, [canonical])
+        return df_src[df_src["Specialty"].isin(variants)]
+
+    def spec_val(df_src, canonical, col, agg="sum"):
+        sub = get_spec(df_src, canonical)
+        if len(sub) == 0:
+            return np.nan
+        if agg == "sum":
+            return sub[col].sum()
+        elif agg == "mean":
+            return sub[col].mean()
+
+    def weeks(days_val):
+        """Convert days to weeks, return formatted string."""
+        if pd.isna(days_val) or days_val == 0:
+            return "—"
+        return f"{days_val / 7:.2f}"
+
+    def pct_str(num, denom):
+        """Return percentage string or — if denominator is 0."""
+        if pd.isna(num) or pd.isna(denom) or denom == 0:
+            return "—"
+        return f"{num / denom * 100:.1f}%"
+
+    def pct_val(num, denom):
+        if pd.isna(num) or pd.isna(denom) or denom == 0:
+            return np.nan
+        return num / denom * 100
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 1 — CORE ELECTIVE SURGERY KPIs
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section">1 · Core Elective Surgery KPIs</div>', unsafe_allow_html=True)
+
+    total_elective = df["Elective_Surg"].sum()
+    total_surg     = df["Total_Surg"].sum()
+    total_new      = df["WL_New"].sum()
+
+    # Top 3 specialties by elective surgeries
+    top_specs_df = (
+        df.groupby("Specialty")["Elective_Surg"]
+        .sum()
+        .sort_values(ascending=False)
+        .reset_index()
+    )
+    top1 = top_specs_df.iloc[0]["Specialty"] if len(top_specs_df) > 0 else "—"
+    top2 = top_specs_df.iloc[1]["Specialty"] if len(top_specs_df) > 1 else "—"
+    top3 = top_specs_df.iloc[2]["Specialty"] if len(top_specs_df) > 2 else "—"
+    top1_v = top_specs_df.iloc[0]["Elective_Surg"] if len(top_specs_df) > 0 else 0
+    top2_v = top_specs_df.iloc[1]["Elective_Surg"] if len(top_specs_df) > 1 else 0
+    top3_v = top_specs_df.iloc[2]["Elective_Surg"] if len(top_specs_df) > 2 else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("# Elective Surgeries (Total)", fmt(total_elective))
+    c2.metric("Highest Specialty", f"{top1}", help=f"{fmt(top1_v)} elective surgeries")
+    c3.metric("2nd Highest Specialty", f"{top2}", help=f"{fmt(top2_v)} elective surgeries")
+    c4.metric("3rd Highest Specialty", f"{top3}", help=f"{fmt(top3_v)} elective surgeries")
+
+    # Top specialties bar chart
+    fig_top = px.bar(
+        top_specs_df.head(10).sort_values("Elective_Surg"),
+        x="Elective_Surg", y="Specialty", orientation="h",
+        color="Elective_Surg",
+        color_continuous_scale=[[0,"#E1F5EE"],[1,TEAL]],
+        text="Elective_Surg", height=340,
+        labels={"Elective_Surg":"Elective Surgeries","Specialty":""},
+        title="Top 10 Specialties — Elective Surgeries"
+    )
+    fig_top.update_coloraxes(showscale=False)
+    fig_top.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+    fig_top.update_layout(make_layout({"margin":dict(l=0,r=60,t=30,b=10)}))
+    fig_top.update_xaxes(gridcolor="#f0f0f0")
+    st.plotly_chart(fig_top, use_container_width=True)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 2 — OVERALL WAITING TIME & VOLUME KPIs
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section-amber">2 · Overall Waiting Time & Volume KPIs</div>', unsafe_allow_html=True)
+
+    avg_days_overall = df["Days_2nd_Slot"].mean()
+    avg_weeks_overall = avg_days_overall / 7 if not pd.isna(avg_days_overall) else np.nan
+
+    vol_gt36 = df["WL_Unbooked36"].sum()   # patients waiting > 36 days (unbooked beyond 36d)
+    vol_lt36 = df["WL_Booked36"].sum()     # patients waiting < 36 days (booked within 36d)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Average Waiting Time (Weeks)",
+              f"{avg_weeks_overall:.2f}" if not pd.isna(avg_weeks_overall) else "—")
+    c2.metric("Volume of New Patients Added to List", fmt(total_new))
+    c3.metric("Patients Waiting > 36 Days", fmt(vol_gt36))
+    c4.metric("Patients Waiting < 36 Days", fmt(vol_lt36))
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 3 — PRIMARY THREE SPECIALTIES (Ophthalmology / Orthopedics / Pediatrics)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section-blue">3 · Primary Specialties — Ophthalmology · Orthopedics · Pediatrics</div>', unsafe_allow_html=True)
+
+    PRIMARY_SPECS = ["Ophthalmology", "Orthopedics", "Pediatrics"]
+
+    # ── Waiting time (weeks) ─────────────────────────────────────────────
+    st.markdown("**Average Waiting Time (Weeks)**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        d = spec_val(df, spec, "Days_2nd_Slot", "mean")
+        col_widget.metric(f"Avg Weeks — {spec}", weeks(d))
+
+    # ── WL volumes ──────────────────────────────────────────────────────
+    st.markdown("**Volume of Patients on Waiting List**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        v = spec_val(df, spec, "WL_Total", "sum")
+        col_widget.metric(f"WL Volume — {spec}", fmt(v))
+
+    # ── New patients ─────────────────────────────────────────────────────
+    st.markdown("**Volume of New Patients on Waiting List**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        v = spec_val(df, spec, "WL_New", "sum")
+        col_widget.metric(f"New Patients — {spec}", fmt(v))
+
+    # ── Elective surgeries ───────────────────────────────────────────────
+    st.markdown("**# Elective Surgeries**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        v = spec_val(df, spec, "Elective_Surg", "sum")
+        col_widget.metric(f"Elective — {spec}", fmt(v))
+
+    # ── % Performed surgeries vs new patients ────────────────────────────
+    st.markdown("**% Performed Surgeries vs New Patients**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        el = spec_val(df, spec, "Elective_Surg", "sum")
+        nw = spec_val(df, spec, "WL_New", "sum")
+        col_widget.metric(f"% Surg vs New — {spec}", pct_str(el, nw))
+
+    # ── % Surgeries performed (Total_Surg / WL_New) ──────────────────────
+    st.markdown("**Percentage of Surgeries Performed**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        ts = spec_val(df, spec, "Total_Surg", "sum")
+        nw = spec_val(df, spec, "WL_New", "sum")
+        col_widget.metric(f"% Performed — {spec}", pct_str(ts, nw))
+
+    # ── Referrals (not in dataset) ───────────────────────────────────────
+    st.markdown("**Number of Referrals**")
+    c1, c2, c3 = st.columns(3)
+    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
+        col_widget.markdown(
+            f'<div class="placeholder-box">Referrals — {spec}<br>'
+            f'<strong>⚠ Not available in current dataset</strong></div>',
+            unsafe_allow_html=True
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 4 — EXTENDED SPECIALTIES (11 additional)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section">4 · Extended Specialties — Waiting Time (Weeks)</div>', unsafe_allow_html=True)
+
+    EXTENDED_SPECS = [
+        "General Surgery", "Bariatric Surgery", "Plastic Surgery",
+        "ENT Surgery - Otolaryngology", "Urology", "Dentistry",
+        "Vascular Surgery", "Obstetrics & Gynecology", "Neurosurgery",
+        "Oral Surgery", "Cardiothoracic Surgery",
+    ]
+
+    # ── Waiting time in weeks ────────────────────────────────────────────
+    wait_rows = []
+    for spec in EXTENDED_SPECS:
+        d = spec_val(df, spec, "Days_2nd_Slot", "mean")
+        wait_rows.append({"Specialty": spec, "Avg Weeks": round(d / 7, 2) if not pd.isna(d) else None})
+    wait_df = pd.DataFrame(wait_rows).dropna(subset=["Avg Weeks"])
+
+    if len(wait_df) > 0:
+        fig_wait = px.bar(
+            wait_df.sort_values("Avg Weeks"),
+            x="Avg Weeks", y="Specialty", orientation="h",
+            color="Avg Weeks",
+            color_continuous_scale=[[0,"#E1F5EE"],[0.5,AMBER],[1,CORAL]],
+            text="Avg Weeks", height=380,
+            labels={"Avg Weeks":"Avg Waiting (Weeks)","Specialty":""},
+        )
+        fig_wait.update_coloraxes(showscale=False)
+        fig_wait.update_traces(texttemplate="%{text:.2f} wks", textposition="outside")
+        fig_wait.update_layout(make_layout({"margin":dict(l=0,r=80,t=10,b=10)}))
+        fig_wait.update_xaxes(gridcolor="#f0f0f0")
+        st.plotly_chart(fig_wait, use_container_width=True)
+    else:
+        st.info("No waiting time data available for extended specialties.")
+
+    # ── New patients on waiting list ─────────────────────────────────────
+    st.markdown('<div class="exec-section">4b · Extended Specialties — Volume of New Patients on Waiting List</div>', unsafe_allow_html=True)
+
+    new_rows = []
+    for spec in EXTENDED_SPECS:
+        v = spec_val(df, spec, "WL_New", "sum")
+        new_rows.append({"Specialty": spec, "New Patients": int(v) if not pd.isna(v) else 0})
+    new_df = pd.DataFrame(new_rows)
+
+    cols_ext = st.columns(4)
+    for i, row in new_df.iterrows():
+        cols_ext[i % 4].metric(f"New — {row['Specialty']}", fmt(row["New Patients"]))
+
+    # ── Elective surgeries per extended specialty ─────────────────────────
+    st.markdown('<div class="exec-section">4c · Extended Specialties — # Elective Surgeries</div>', unsafe_allow_html=True)
+
+    el_rows = []
+    for spec in EXTENDED_SPECS:
+        v = spec_val(df, spec, "Elective_Surg", "sum")
+        el_rows.append({"Specialty": spec, "Elective": int(v) if not pd.isna(v) else 0})
+    el_df = pd.DataFrame(el_rows)
+
+    fig_el = px.bar(
+        el_df.sort_values("Elective"),
+        x="Elective", y="Specialty", orientation="h",
+        color="Elective",
+        color_continuous_scale=[[0,"#E1F5EE"],[1,TEAL]],
+        text="Elective", height=380,
+        labels={"Elective":"Elective Surgeries","Specialty":""},
+    )
+    fig_el.update_coloraxes(showscale=False)
+    fig_el.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+    fig_el.update_layout(make_layout({"margin":dict(l=0,r=60,t=10,b=10)}))
+    fig_el.update_xaxes(gridcolor="#f0f0f0")
+    st.plotly_chart(fig_el, use_container_width=True)
+
+    # ── Referrals for extended specialties (not in dataset) ───────────────
+    st.markdown('<div class="exec-section-amber">4d · Extended Specialties — Number of Referrals</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="placeholder-box">Referral data for all extended specialties '
+        '(General Surgery, Bariatric Surgery, Plastic Surgery, ENT, Urology, Dentistry, '
+        'Vascular Surgery, OB/GYN, Neurosurgery, Oral Surgery, Cardiothoracic Surgery) — '
+        '<strong>⚠ Not available in current dataset</strong>. '
+        'This field requires a separate referrals data source.</div>',
+        unsafe_allow_html=True
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 5 — PERCENTAGE OF SURGERIES PERFORMED (all specialties)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section-blue">5 · Percentage of Surgeries Performed (Total Surg ÷ New Patients × 100)</div>', unsafe_allow_html=True)
+
+    ALL_SPECS_PERF = PRIMARY_SPECS + EXTENDED_SPECS
+    perf_rows = []
+    for spec in ALL_SPECS_PERF:
+        ts = spec_val(df, spec, "Total_Surg", "sum")
+        nw = spec_val(df, spec, "WL_New", "sum")
+        pv = pct_val(ts, nw)
+        perf_rows.append({
+            "Specialty": spec,
+            "Total Surg": ts if not pd.isna(ts) else 0,
+            "New Patients": nw if not pd.isna(nw) else 0,
+            "% Performed": round(pv, 1) if not pd.isna(pv) else None,
+        })
+    perf_df = pd.DataFrame(perf_rows).dropna(subset=["% Performed"])
+
+    if len(perf_df) > 0:
+        fig_perf = px.bar(
+            perf_df.sort_values("% Performed"),
+            x="% Performed", y="Specialty", orientation="h",
+            color="% Performed",
+            color_continuous_scale=[[0,CORAL],[0.5,AMBER],[1,TEAL]],
+            text="% Performed", height=480,
+            labels={"% Performed":"% Surgeries Performed","Specialty":""},
+        )
+        fig_perf.update_coloraxes(showscale=False)
+        fig_perf.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig_perf.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+        fig_perf.update_xaxes(gridcolor="#f0f0f0")
+        st.plotly_chart(fig_perf, use_container_width=True)
+
+    # Overall Kingdom Percentage
+    total_ts_all = df["Total_Surg"].sum()
+    total_nw_all = df["WL_New"].sum()
+    kingdom_pct  = pct_val(total_ts_all, total_nw_all)
+    st.metric(
+        "Overall Kingdom Percentage (Total Surgeries ÷ Total New Patients × 100)",
+        f"{kingdom_pct:.1f}%" if not pd.isna(kingdom_pct) else "—"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 6 — DAY SURGERY & CANCELLATION RATES
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section-amber">6 · Day Surgery & Surgical Cancellation</div>', unsafe_allow_html=True)
+
+    total_oneday = df["OnDay_Surg"].sum()
+    day_surg_pct = pct_val(total_oneday, total_surg)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total Day (One-Day) Surgeries", fmt(total_oneday))
+    c2.metric("% Total Day Surgery (OnDay ÷ Total Surg × 100)",
+              f"{day_surg_pct:.1f}%" if not pd.isna(day_surg_pct) else "—")
+    c3.markdown(
+        '<div class="placeholder-box">% Surgical Cancellation<br>'
+        '<strong>⚠ Not available in current dataset</strong><br>'
+        'Requires cancelled-case records not present in the specialty-level file.</div>',
+        unsafe_allow_html=True
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 7 — NON-SCHEDULED SURGERIES & TOTAL REFERRALS
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section-coral">7 · Non-Scheduled Surgeries & Total Referrals</div>', unsafe_allow_html=True)
+
+    total_nonsched = df["WL_NonSched"].sum()
+
+    c1, c2 = st.columns(2)
+    c1.metric("Non-Scheduled Surgeries (WL_NonSched)", fmt(total_nonsched))
+    c2.markdown(
+        '<div class="placeholder-box">Total Referrals<br>'
+        '<strong>⚠ Not available in current dataset</strong><br>'
+        'Referral counts are not captured in the specialty-level aggregated file.</div>',
+        unsafe_allow_html=True
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECTION 8 — FULL SUMMARY TABLE (all specialties)
+    # ═══════════════════════════════════════════════════════════════════════
+    st.markdown('<div class="exec-section">8 · Full KPI Summary Table — All Specialties</div>', unsafe_allow_html=True)
+
+    summary_rows = []
+    for spec in ALL_SPECS_PERF:
+        d_days  = spec_val(df, spec, "Days_2nd_Slot", "mean")
+        wl_tot  = spec_val(df, spec, "WL_Total", "sum")
+        wl_new  = spec_val(df, spec, "WL_New", "sum")
+        el_surg = spec_val(df, spec, "Elective_Surg", "sum")
+        tot_sg  = spec_val(df, spec, "Total_Surg", "sum")
+        pv      = pct_val(tot_sg, wl_new)
+        summary_rows.append({
+            "Specialty":            spec,
+            "Avg Wait (Weeks)":     round(d_days / 7, 2) if not pd.isna(d_days) else None,
+            "WL Volume":            int(wl_tot)  if not pd.isna(wl_tot)  else 0,
+            "New Patients":         int(wl_new)  if not pd.isna(wl_new)  else 0,
+            "Elective Surgeries":   int(el_surg) if not pd.isna(el_surg) else 0,
+            "Total Surgeries":      int(tot_sg)  if not pd.isna(tot_sg)  else 0,
+            "% Surg Performed":     f"{pv:.1f}%" if not pd.isna(pv) else "—",
+            "Referrals":            "N/A (not in dataset)",
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+
+    # Colour-code % Surg Performed column
+    def style_pct(val):
+        try:
+            v = float(str(val).replace("%",""))
+            if v >= 100:  return "background-color:#d4edda; color:#155724"
+            if v >= 50:   return "background-color:#fff3cd; color:#856404"
+            return "background-color:#f8d7da; color:#721c24"
+        except Exception:
+            return ""
+
+    styled = summary_df.style.applymap(style_pct, subset=["% Surg Performed"])
+    st.dataframe(styled, use_container_width=True, height=480)
+
+    st.markdown("---")
+    st.caption(
+        "**Formula reference:** "
+        "Avg Wait (Weeks) = Days_2nd_Slot ÷ 7 · "
+        "% Surg Performed = Total_Surg ÷ WL_New × 100 · "
+        "% Day Surgery = OnDay_Surg ÷ Total_Surg × 100 · "
+        "Overall Kingdom % = Σ Total_Surg ÷ Σ WL_New × 100. "
+        "Referrals, Surgical Cancellation, and Non-scheduled surgery details "
+        "require additional data sources not present in the specialty-level aggregated file."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — WEEKLY-SPECIALTY
+# ══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.header("Weekly Specialty Report")
+    st.caption(
+        "Shows 4 KPIs per specialty: # Patients on Waiting List · # Elective Surgeries · "
+        "# Referrals · # New Patients. Data from File 1 — Primary Upload."
+    )
+
+    # ── Working dataset ───────────────────────────────────────────────────────
+    df_ws = avail1.copy()
+
+    # ── Canonical specialty list (ordered alphabetically as in High Level Table)
+    WS_SPECS = [
+        "Bariatric Surgery",
+        "Cardiothoracic Surgery",
+        "Dentistry",
+        "ENT Surgery - Otolaryngology",
+        "General Surgery",
+        "Neurosurgery",
+        "Obstetrics & Gynecology",
+        "Ophthalmology",
+        "Oral Surgery",
+        "Orthopedics",
+        "Pediatrics",
+        "Plastic Surgery",
+        "Urology",
+        "Vascular Surgery",
+    ]
+
+    # ── Spec-map (reuse same variants as Weekly-Executive) ────────────────────
+    WS_SPEC_MAP = {
+        "Ophthalmology":                ["Ophthalmology","Ophthlamology","Opthalmology"],
+        "Orthopedics":                  ["Orthopedics","Orthopedics Surgery","Orthopaedics"],
+        "Pediatrics":                   ["Pediatrics","Pediatrics Surgery","Paediatrics"],
+        "General Surgery":              ["General Surgery"],
+        "Bariatric Surgery":            ["Bariatric Surgery"],
+        "Plastic Surgery":              ["Plastic Surgery"],
+        "ENT Surgery - Otolaryngology": ["ENT Surgery - Otolaryngology","ENT Surgery","Otolaryngology"],
+        "Urology":                      ["Urology"],
+        "Dentistry":                    ["Dentistry"],
+        "Vascular Surgery":             ["Vascular Surgery"],
+        "Obstetrics & Gynecology":      ["Obstetrics & Gynecology","Obstetrics and Gynecology","OB/GYN"],
+        "Neurosurgery":                 ["Neurosurgery"],
+        "Oral Surgery":                 ["Oral Surgery"],
+        "Cardiothoracic Surgery":       ["Cardiothoracic Surgery"],
+    }
+
+    def ws_get(df_src, canonical):
+        variants = WS_SPEC_MAP.get(canonical, [canonical])
+        return df_src[df_src["Specialty"].isin(variants)]
+
+    def ws_sum(df_src, canonical, col):
+        sub = ws_get(df_src, canonical)
+        return sub[col].sum() if len(sub) > 0 else 0
+
+    # ── Summary bar charts (all specialties, 4 KPIs) ─────────────────────────
+    rows = []
+    for spec in WS_SPECS:
+        rows.append({
+            "Specialty":          spec,
+            "# Patients (WL)":    ws_sum(df_ws, spec, "WL_Total"),
+            "# Elective Surg":    ws_sum(df_ws, spec, "Elective_Surg"),
+            "# New Patients":     ws_sum(df_ws, spec, "WL_New"),
+        })
+    ws_df = pd.DataFrame(rows)
+
+    # ── Four KPI overview metrics ─────────────────────────────────────────────
+    st.markdown('<div class="exec-section">Summary — All Specialties</div>', unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total # Patients (WL)",    f"{int(ws_df['# Patients (WL)'].sum()):,}")
+    c2.metric("Total # Elective Surg",    f"{int(ws_df['# Elective Surg'].sum()):,}")
+    c3.metric("Total # New Patients",     f"{int(ws_df['# New Patients'].sum()):,}")
+    c4.markdown(
+        '<div class="placeholder-box" style="margin-top:6px;">'
+        'Total # Referrals<br><strong>⚠ Not in dataset</strong></div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("---")
+
+    # ── Side-by-side bar charts ───────────────────────────────────────────────
+    left, right = st.columns(2)
+
+    with left:
+        st.subheader("# Patients on Waiting List")
+        fig_wl = px.bar(
+            ws_df.sort_values("# Patients (WL)"),
+            x="# Patients (WL)", y="Specialty", orientation="h",
+            color="# Patients (WL)",
+            color_continuous_scale=[[0,"#E1F5EE"],[1,TEAL]],
+            text="# Patients (WL)", height=460,
+            labels={"# Patients (WL)":"Patients","Specialty":""},
+        )
+        fig_wl.update_coloraxes(showscale=False)
+        fig_wl.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_wl.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+        fig_wl.update_xaxes(gridcolor="#f0f0f0")
+        st.plotly_chart(fig_wl, use_container_width=True)
+
+    with right:
+        st.subheader("# Elective Surgeries")
+        fig_el = px.bar(
+            ws_df.sort_values("# Elective Surg"),
+            x="# Elective Surg", y="Specialty", orientation="h",
+            color="# Elective Surg",
+            color_continuous_scale=[[0,"#E1F5EE"],[1,BLUE]],
+            text="# Elective Surg", height=460,
+            labels={"# Elective Surg":"Surgeries","Specialty":""},
+        )
+        fig_el.update_coloraxes(showscale=False)
+        fig_el.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_el.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+        fig_el.update_xaxes(gridcolor="#f0f0f0")
+        st.plotly_chart(fig_el, use_container_width=True)
+
+    left2, right2 = st.columns(2)
+
+    with left2:
+        st.subheader("# New Patients Added to Waiting List")
+        fig_np = px.bar(
+            ws_df.sort_values("# New Patients"),
+            x="# New Patients", y="Specialty", orientation="h",
+            color="# New Patients",
+            color_continuous_scale=[[0,"#E1F5EE"],[1,AMBER]],
+            text="# New Patients", height=460,
+            labels={"# New Patients":"New Patients","Specialty":""},
+        )
+        fig_np.update_coloraxes(showscale=False)
+        fig_np.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+        fig_np.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+        fig_np.update_xaxes(gridcolor="#f0f0f0")
+        st.plotly_chart(fig_np, use_container_width=True)
+
+    with right2:
+        st.subheader("# Referrals")
+        st.markdown(
+            '<div class="placeholder-box" style="margin-top:60px; padding:30px 20px; text-align:center;">'
+            '<span style="font-size:1.1rem;">⚠ Referral data is <strong>not available</strong> '
+            'in the current specialty-level dataset.<br><br>'
+            'This KPI requires a separate referrals data source to be uploaded.</span>'
+            '</div>',
+            unsafe_allow_html=True
+        )
+
+    st.markdown("---")
+
+    # ── Per-specialty detail cards ────────────────────────────────────────────
+    st.markdown('<div class="exec-section">Per-Specialty Detail Cards</div>', unsafe_allow_html=True)
+
+    # Render 2 cards per row
+    for i in range(0, len(WS_SPECS), 2):
+        cols = st.columns(2)
+        for j, spec in enumerate(WS_SPECS[i:i+2]):
+            with cols[j]:
+                patients  = ws_sum(df_ws, spec, "WL_Total")
+                elective  = ws_sum(df_ws, spec, "Elective_Surg")
+                new_pts   = ws_sum(df_ws, spec, "WL_New")
+
+                st.markdown(
+                    f"""
+                    <div style="
+                        border:1px solid rgba(29,158,117,0.3);
+                        border-radius:10px;
+                        padding:14px 18px;
+                        margin-bottom:12px;
+                        background:rgba(29,158,117,0.04);
+                    ">
+                      <div style="font-weight:700;font-size:1rem;margin-bottom:10px;
+                                  color:#1D9E75;border-bottom:1px solid rgba(29,158,117,0.2);
+                                  padding-bottom:6px;">{spec}</div>
+                      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+                        <div>
+                          <div style="font-size:0.72rem;color:#6b7280;"># Patients (WL)</div>
+                          <div style="font-size:1.4rem;font-weight:700;">{int(patients):,}</div>
+                        </div>
+                        <div>
+                          <div style="font-size:0.72rem;color:#6b7280;"># Elective Surgeries</div>
+                          <div style="font-size:1.4rem;font-weight:700;">{int(elective):,}</div>
+                        </div>
+                        <div>
+                          <div style="font-size:0.72rem;color:#6b7280;"># New Patients</div>
+                          <div style="font-size:1.4rem;font-weight:700;">{int(new_pts):,}</div>
+                        </div>
+                        <div>
+                          <div style="font-size:0.72rem;color:#b07a00;"># Referrals</div>
+                          <div style="font-size:1rem;font-weight:600;color:#b07a00;">N/A</div>
+                        </div>
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    # ── Full data table ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<div class="exec-section">Full Specialty Table</div>', unsafe_allow_html=True)
+    ws_display = ws_df.copy()
+    ws_display["# Referrals"] = "N/A (not in dataset)"
+    ws_display = ws_display[["Specialty","# Patients (WL)","# Elective Surg","# New Patients","# Referrals"]]
+    ws_display.columns = ["Specialty","# Patients (WL)","# Elective Surgeries","# New Patients","# Referrals"]
+    st.dataframe(ws_display.reset_index(drop=True), use_container_width=True, height=520)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 9 — HIGH LEVEL TABLE
+# ══════════════════════════════════════════════════════════════════════════════
+with tab9:
+    st.header("High Level Table")
+    st.caption(
+        "For each specialty: Sum of Total WL Patients and % Surgeries Performed this week, "
+        "broken down by Directorate / Cluster. "
+        "Formula: % Surgeries Performed = Total_Surg ÷ WL_New × 100."
+    )
+
+    # ── Working dataset ───────────────────────────────────────────────────────
+    df_hl = avail1.copy()
+
+    # ── 14 specialties in the exact order requested ───────────────────────────
+    HL_SPECS_ORDERED = [
+        "Bariatric Surgery",
+        "Cardiothoracic Surgery",
+        "Dentistry",
+        "ENT Surgery - Otolaryngology",
+        "General Surgery",
+        "Neurosurgery",
+        "Obstetrics & Gynecology",
+        "Ophthalmology",
+        "Oral Surgery",
+        "Orthopedics",
+        "Pediatrics",
+        "Plastic Surgery",
+        "Urology",
+        "Vascular Surgery",
+    ]
+
+    HL_SPEC_MAP = {
+        "Ophthalmology":                ["Ophthalmology","Ophthlamology","Opthalmology"],
+        "Orthopedics":                  ["Orthopedics","Orthopedics Surgery","Orthopaedics"],
+        "Pediatrics":                   ["Pediatrics","Pediatrics Surgery","Paediatrics"],
+        "General Surgery":              ["General Surgery"],
+        "Bariatric Surgery":            ["Bariatric Surgery"],
+        "Plastic Surgery":              ["Plastic Surgery"],
+        "ENT Surgery - Otolaryngology": ["ENT Surgery - Otolaryngology","ENT Surgery","Otolaryngology"],
+        "Urology":                      ["Urology"],
+        "Dentistry":                    ["Dentistry"],
+        "Vascular Surgery":             ["Vascular Surgery"],
+        "Obstetrics & Gynecology":      ["Obstetrics & Gynecology","Obstetrics and Gynecology","OB/GYN"],
+        "Neurosurgery":                 ["Neurosurgery"],
+        "Oral Surgery":                 ["Oral Surgery"],
+        "Cardiothoracic Surgery":       ["Cardiothoracic Surgery"],
+    }
+
+    # ── Normalise specialty names in df_hl to canonical form ─────────────────
+    reverse_map = {}
+    for canonical, variants in HL_SPEC_MAP.items():
+        for v in variants:
+            reverse_map[v] = canonical
+
+    df_hl["Specialty_Canon"] = df_hl["Specialty"].map(reverse_map).fillna(df_hl["Specialty"])
+
+    # ── Aggregate by Directorate × Canonical Specialty ───────────────────────
+    agg_hl = (
+        df_hl.groupby(["Directorate","Specialty_Canon"])
+        .agg(WL_Total=("WL_Total","sum"), Total_Surg=("Total_Surg","sum"), WL_New=("WL_New","sum"))
+        .reset_index()
+    )
+    agg_hl["Pct_Perf"] = (agg_hl["Total_Surg"] / agg_hl["WL_New"] * 100).round(1)
+
+    # ── Get all directorates (rows) ───────────────────────────────────────────
+    directorates = sorted(df_hl["Directorate"].dropna().unique().tolist())
+
+    # ── Build wide pivot table ────────────────────────────────────────────────
+    # Columns: Directorate | [Spec1 WL, Spec1 %, Spec2 WL, Spec2 %, ...]
+    pivot_rows = []
+    for d in directorates:
+        row = {"Directorate": d}
+        d_data = agg_hl[agg_hl["Directorate"] == d]
+        for spec in HL_SPECS_ORDERED:
+            spec_row = d_data[d_data["Specialty_Canon"] == spec]
+            if len(spec_row) > 0:
+                row[f"{spec} — WL"] = int(spec_row["WL_Total"].iloc[0])
+                pct = spec_row["Pct_Perf"].iloc[0]
+                row[f"{spec} — %"] = f"{pct:.1f}%" if not pd.isna(pct) else "—"
+            else:
+                row[f"{spec} — WL"] = 0
+                row[f"{spec} — %"] = "—"
+        pivot_rows.append(row)
+
+    # Grand Total row
+    total_row = {"Directorate": "GRAND TOTAL"}
+    for spec in HL_SPECS_ORDERED:
+        spec_data = agg_hl[agg_hl["Specialty_Canon"] == spec]
+        total_wl   = int(spec_data["WL_Total"].sum())
+        total_surg = spec_data["Total_Surg"].sum()
+        total_new  = spec_data["WL_New"].sum()
+        total_pct  = (total_surg / total_new * 100) if total_new > 0 else np.nan
+        total_row[f"{spec} — WL"] = total_wl
+        total_row[f"{spec} — %"]  = f"{total_pct:.1f}%" if not pd.isna(total_pct) else "—"
+    pivot_rows.append(total_row)
+
+    pivot_df = pd.DataFrame(pivot_rows)
+
+    # ── Summary KPI strip ─────────────────────────────────────────────────────
+    st.markdown('<div class="exec-section">Kingdom-Level Summary</div>', unsafe_allow_html=True)
+
+    total_wl_all   = df_hl["WL_Total"].sum()
+    total_surg_all = df_hl["Total_Surg"].sum()
+    total_new_all  = df_hl["WL_New"].sum()
+    kingdom_pct_hl = (total_surg_all / total_new_all * 100) if total_new_all > 0 else np.nan
+    num_dirs       = len(directorates)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total WL Patients (Kingdom)",   f"{int(total_wl_all):,}")
+    c2.metric("Total Surgeries (Kingdom)",     f"{int(total_surg_all):,}")
+    c3.metric("Overall Kingdom % Performed",   f"{kingdom_pct_hl:.1f}%" if not pd.isna(kingdom_pct_hl) else "—")
+    c4.metric("Directorates Reporting",        str(num_dirs))
+
+    st.markdown("---")
+
+    # ── Specialty selector for focused view ───────────────────────────────────
+    st.markdown('<div class="exec-section-blue">Specialty Deep-Dive (WL + % Performed by Directorate)</div>', unsafe_allow_html=True)
+
+    sel_spec_hl = st.selectbox(
+        "Select specialty to visualise",
+        HL_SPECS_ORDERED,
+        key="hl_spec_sel"
+    )
+
+    spec_view = agg_hl[agg_hl["Specialty_Canon"] == sel_spec_hl].copy()
+    spec_view = spec_view.sort_values("WL_Total", ascending=False)
+
+    if len(spec_view) > 0:
+        col_l, col_r = st.columns(2)
+
+        with col_l:
+            st.subheader(f"WL Volume — {sel_spec_hl}")
+            fig_sv_wl = px.bar(
+                spec_view.sort_values("WL_Total"),
+                x="WL_Total", y="Directorate", orientation="h",
+                color="WL_Total",
+                color_continuous_scale=[[0,"#E1F5EE"],[1,TEAL]],
+                text="WL_Total", height=400,
+                labels={"WL_Total":"WL Patients","Directorate":""},
+            )
+            fig_sv_wl.update_coloraxes(showscale=False)
+            fig_sv_wl.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+            fig_sv_wl.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+            fig_sv_wl.update_xaxes(gridcolor="#f0f0f0")
+            st.plotly_chart(fig_sv_wl, use_container_width=True)
+
+        with col_r:
+            st.subheader(f"% Surgeries Performed — {sel_spec_hl}")
+            spec_pct_view = spec_view.dropna(subset=["Pct_Perf"]).sort_values("Pct_Perf")
+            if len(spec_pct_view) > 0:
+                fig_sv_pct = px.bar(
+                    spec_pct_view,
+                    x="Pct_Perf", y="Directorate", orientation="h",
+                    color="Pct_Perf",
+                    color_continuous_scale=[[0,CORAL],[0.5,AMBER],[1,TEAL]],
+                    text="Pct_Perf", height=400,
+                    labels={"Pct_Perf":"% Performed","Directorate":""},
+                )
+                fig_sv_pct.update_coloraxes(showscale=False)
+                fig_sv_pct.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+                fig_sv_pct.update_layout(make_layout({"margin":dict(l=0,r=70,t=10,b=10)}))
+                fig_sv_pct.update_xaxes(gridcolor="#f0f0f0")
+                st.plotly_chart(fig_sv_pct, use_container_width=True)
+            else:
+                st.info("No % data available for this specialty.")
+    else:
+        st.info(f"No data found for {sel_spec_hl} in the current file.")
+
+    st.markdown("---")
+
+    # ── Full wide pivot table ─────────────────────────────────────────────────
+    st.markdown('<div class="exec-section">Full High Level Table — All Specialties × All Directorates</div>', unsafe_allow_html=True)
+    st.caption(
+        "Each specialty has two columns: **WL** = Sum of Total WL Patients · "
+        "**%** = % Surgeries Performed (Total_Surg ÷ WL_New × 100). "
+        "Scroll horizontally to view all 14 specialties."
+    )
+
+    # Style the Grand Total row and % columns
+    def style_hl(df_styled):
+        # Highlight Grand Total row
+        styles = pd.DataFrame("", index=df_styled.index, columns=df_styled.columns)
+        last_idx = df_styled.index[-1]
+        styles.loc[last_idx, :] = "background-color:#1D9E75;color:white;font-weight:700;"
+
+        # Colour-code % columns
+        for col in df_styled.columns:
+            if col.endswith("— %"):
+                for idx in df_styled.index[:-1]:
+                    val = df_styled.loc[idx, col]
+                    try:
+                        v = float(str(val).replace("%",""))
+                        if v >= 100:
+                            styles.loc[idx, col] = "background-color:#d4edda;color:#155724;"
+                        elif v >= 50:
+                            styles.loc[idx, col] = "background-color:#fff3cd;color:#856404;"
+                        else:
+                            styles.loc[idx, col] = "background-color:#f8d7da;color:#721c24;"
+                    except Exception:
+                        pass
+        return styles
+
+    styled_hl = pivot_df.style.apply(style_hl, axis=None)
+    st.dataframe(styled_hl, use_container_width=True, height=600)
+
+    # ── Download button ───────────────────────────────────────────────────────
+    st.markdown("---")
+    csv_data = pivot_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="Download High Level Table as CSV",
+        data=csv_data,
+        file_name="high_level_table.csv",
+        mime="text/csv",
+    )
