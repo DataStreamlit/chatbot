@@ -1,1701 +1,1357 @@
 """
-OR Waiting List & Performance Dashboard — with File Comparison
-Run:  streamlit run or_dashboard.py
+or_aggregator.py
+================
+Merged replacement for **or_score.py** + **aggregate_or_data.py**.
 
-Compatible with Streamlit >= 0.86 and Python >= 3.8
+Processes a folder of OR data collector workbooks (.xlsx / .xlsm) and writes
+a **single** output Excel file with **two sheets**:
+
+  Sheet 1 — "Specialty Level Data"   (previously Aggregated_Specialty_Level.xlsx)
+  Sheet 2 — "Score"                  (previously OR_Score_Aggregated.xlsx)
+
+Both sheets share the same embedded Key table (hospital → directorate mapping).
+The Key table is also written as a third sheet "Key" for reference.
+
+Usage
+-----
+  python or_aggregator.py --input "D:\\OR Files\\July 2025 Week 2" --output OR_Aggregated.xlsx
+  python or_aggregator.py          # interactive mode — prompts for folder
+
+Arguments
+---------
+  --input  / -i   Folder containing raw OR data collector files
+  --output / -o   Output Excel file (default: OR_Aggregated.xlsx)
+  --key    / -k   (Optional) Excel file with a Key sheet to override built-in mapping
 """
 
-import streamlit as st
+from __future__ import annotations
+
+import argparse
+import io
+import logging
+import os
+import sys
+import warnings
+from datetime import datetime, timedelta
+
+import openpyxl
 import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
-# ── STREAMLIT VERSION COMPAT ──────────────────────────────────────────────────
-if hasattr(st, "cache_data"):
-    _cache = st.cache_data
-elif hasattr(st, "experimental_memo"):
-    _cache = st.experimental_memo
-else:
-    _cache = st.cache
+warnings.filterwarnings("ignore")
 
-# ── PAGE CONFIG ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="OR Performance Dashboard",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS — SPECIALTY LEVEL DATA (Sheet 1)
+# ══════════════════════════════════════════════════════════════════════════════
 
-st.markdown("""
-<style>
-  /* ── metrics ── */
-  [data-testid="stMetricValue"] { font-size:1.9rem; }
-  [data-testid="stMetricLabel"] { font-size:0.8rem; color:#6b7280; }
-  [data-testid="stMetricDelta"] { font-size:0.75rem; }
+SPECIALTY_ROWS = 14
 
-  /* ── layout ── */
-  .block-container { padding-top:1.2rem; }
-  h1 { font-size:1.5rem !important; }
-  h2 { font-size:1.15rem !important; }
-
-  /* ── tabs — visible in both light and dark mode ── */
-  .stTabs [data-baseweb="tab-list"] {
-    gap: 4px;
-    background-color: transparent;
-    border-bottom: 2px solid rgba(128,128,128,0.25);
-    padding-bottom: 0;
-  }
-  .stTabs [data-baseweb="tab"] {
-    font-size: 0.88rem;
-    font-weight: 500;
-    padding: 8px 16px;
-    border-radius: 6px 6px 0 0;
-    border: 1px solid transparent;
-    color: inherit;
-    background-color: rgba(128,128,128,0.08);
-  }
-  .stTabs [data-baseweb="tab"]:hover {
-    background-color: rgba(128,128,128,0.18);
-    border-color: rgba(128,128,128,0.25);
-  }
-  .stTabs [aria-selected="true"] {
-    background-color: rgba(29,158,117,0.15) !important;
-    border-color: #1D9E75 !important;
-    border-bottom-color: transparent !important;
-    color: #1D9E75 !important;
-  }
-  /* active tab bottom marker line */
-  .stTabs [data-baseweb="tab-highlight"] {
-    background-color: #1D9E75 !important;
-    height: 3px;
-  }
-  /* tab panel top padding */
-  .stTabs [data-baseweb="tab-panel"] {
-    padding-top: 1rem;
-  }
-
-  /* ── Weekly-Executive section headers ── */
-  .exec-section {
-    background: linear-gradient(90deg, rgba(29,158,117,0.12) 0%, rgba(29,158,117,0.02) 100%);
-    border-left: 4px solid #1D9E75;
-    padding: 6px 14px;
-    border-radius: 0 6px 6px 0;
-    margin: 18px 0 10px 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-  }
-  .exec-section-amber {
-    background: linear-gradient(90deg, rgba(239,159,39,0.12) 0%, rgba(239,159,39,0.02) 100%);
-    border-left: 4px solid #EF9F27;
-    padding: 6px 14px;
-    border-radius: 0 6px 6px 0;
-    margin: 18px 0 10px 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-  }
-  .exec-section-blue {
-    background: linear-gradient(90deg, rgba(55,138,221,0.12) 0%, rgba(55,138,221,0.02) 100%);
-    border-left: 4px solid #378ADD;
-    padding: 6px 14px;
-    border-radius: 0 6px 6px 0;
-    margin: 18px 0 10px 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-  }
-  .exec-section-coral {
-    background: linear-gradient(90deg, rgba(216,90,48,0.12) 0%, rgba(216,90,48,0.02) 100%);
-    border-left: 4px solid #D85A30;
-    padding: 6px 14px;
-    border-radius: 0 6px 6px 0;
-    margin: 18px 0 10px 0;
-    font-size: 1.05rem;
-    font-weight: 600;
-  }
-  .placeholder-box {
-    background: rgba(239,159,39,0.08);
-    border: 1px dashed #EF9F27;
-    border-radius: 6px;
-    padding: 8px 14px;
-    color: #b07a00;
-    font-size: 0.85rem;
-    margin: 4px 0;
-  }
-</style>
-""", unsafe_allow_html=True)
-
-# ── COLOURS ───────────────────────────────────────────────────────────────────
-TEAL   = "#1D9E75"
-BLUE   = "#378ADD"
-AMBER  = "#EF9F27"
-CORAL  = "#D85A30"
-PURPLE = "#7F77DD"
-GRAY   = "#888780"
-GREEN  = "#639922"
-SPEC_COLORS = px.colors.qualitative.Safe
-
-# ── COLUMN DEFINITIONS ────────────────────────────────────────────────────────
-COL_NAMES = [
-    "Directorate","Hospital","Hospital_Name","Date","Specialty","Status",
-    "WL_Total","WL_New","WL_Booked36","WL_NonSched","WL_Unbooked36",
-    "OR_Sessions","OR_AvgDuration","Elective_Surg","OnDay_Surg","Total_Surg",
-    "Snapshot_Date","Next_Slot_Date","Days_2nd_Slot","Col16",
-    "NonEm_Func_ORs","NonFunc_ORs","Em_ORs",
-]
-NUM_COLS = [
-    "WL_Total","WL_New","WL_Booked36","WL_NonSched","WL_Unbooked36",
-    "OR_Sessions","OR_AvgDuration","Elective_Surg","OnDay_Surg","Total_Surg",
-    "Days_2nd_Slot","NonEm_Func_ORs","NonFunc_ORs","Em_ORs",
+WAITING_TIME_ALIASES = [
+    "OR Waiting Time",
+    "OR Waiting time",
+    "Waiting Time",
+    "OR WaitingTime",
+    "Waiting time",
 ]
 
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-def fmt(n):
-    if n is None or (isinstance(n, float) and np.isnan(n)):
-        return "—"
-    return f"{int(n):,}"
+SPEC_OUTPUT_COLS = [
+    "Directorate",
+    "Hospital Code",
+    "Hospital Name",
+    "Date",
+    "Specialty",
+    "Specialty available?\n(On Hold, Available, N/A)",
+    "Total volume of patients on waiting list\n(any number or ND \"No Demand\")\nDon't write 0 or zero",
+    "Volume of new patients added to the list\n(any number or ND \"No Demand\")\nDon't write 0 or zero",
+    "Volume of patients with booked surgeries within the next 36 days\n(any number or ND \"No Demand\")\n",
+    "Number of non scheduled cases due to shortage of supply\n(any number or ND \"No Demand\")\n",
+    "Volume of patients without booked surgeries within the next 36 days\n(any number or ND \"No Demand\")\nDon't write 0 or zero",
+    "OR session per week\n(per specialty)",
+    "Average duration of the session (hours)\n ( 2, 4 , 6, 8) hours",
+    "Total of Elective surgeries performed during this week",
+    "Total Number of one day Surgeries performed during this week (According to MoH one day surgries list)",
+    "Total of surgeries performed during this week",
+    "Snapshot capture date \"Thursday\"\n(DD-MMM-YYYY)",
+    "Date of 2nd next available slot appointment\n(DD-MMM-YYYY)",
+    "Calculated days until 2nd Next available appointment",
+    "Column16",
+    "Number of Non-Emergency Functioning ORs",
+    "Number of Non-Functioning ORs",
+    "Number of Emergency Ors",
+]
 
-def make_layout(extra=None):
-    """Build a fresh layout dict each time — avoids the duplicate-key margin error."""
-    base = dict(
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(size=11),
-        margin=dict(l=0, r=10, t=10, b=30),
-    )
-    if extra:
-        base.update(extra)
-    return base
+# ══════════════════════════════════════════════════════════════════════════════
+# CONSTANTS — SCORE (Sheet 2)
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── DATA LOADING ──────────────────────────────────────────────────────────────
-@_cache
-def load_bytes(data):
-    import io
-    df = pd.read_excel(io.BytesIO(data), sheet_name="Specialty Level Data")
+SCORE_OUTPUT_COLS = [
+    "Directorate",
+    "Hospital Code",
+    "Hospital Name",
+    "Month",
+    "Year",
+    "Version",
+    "Manual",
+    "IT",
+    "Score1",
+    "Score2",
+    "Score3",
+    "Score4",
+    "OR Utilization",
+    "Elective surgery Volume Manual",
+    "Emergency Surgery Volume Manual",
+    "Or Utilization IT",
+    "Surgical Cancellation IT",
+    "Number of Non-Em Func OR WT",
+    "Number of Non-Func OR WT",
+    "Number of Em OR WT",
+    "Elective surgery Volume IT",
+    "Emergency Surgery Volume IT",
+    "Elective Surgery Volume (Reconciled)",
+    "Emergency Surgery Volume (Reconciled)",
+]
 
-    if len(df.columns) != len(COL_NAMES):
-        raise ValueError(
-            f"Column count mismatch: Excel has {len(df.columns)} columns, "
-            f"but COL_NAMES has {len(COL_NAMES)}."
-        )
+KPI_MANUAL_ALIASES = [
+    "OR KPI 1-4 & 6 Manual",
+    "OR KPI 1-4 & 6 manual",
+    "OR KPI 1-4 & 6 MANUAL",
+    "KPI 1-4 & 6 Manual",
+    "OR KPI 1-4 &6 Manual",
+    "OR KPI 1-4&6 Manual",
+]
 
-    df.columns = COL_NAMES
+KPI_IT_ALIASES = [
+    "OR KPI 1-4 & 6 IT",
+    "OR KPI 1-4 & 6 it",
+    "OR KPI 1-4 & 6 IT ",
+    "KPI 1-4 & 6 IT",
+    "OR KPI 1-4 &6 IT",
+]
 
-    for c in NUM_COLS:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+# ══════════════════════════════════════════════════════════════════════════════
+# EMBEDDED KEY TABLE  (hospital code → directorate)
+# ══════════════════════════════════════════════════════════════════════════════
 
-@_cache
-def load_path(path):
-    df = pd.read_excel(path, sheet_name="Specialty Level Data")
+_EMBEDDED_KEY_TSV = """\
+Hospital Code\tDirectorate
+AA-GEN-1\tAl Ahsa Health Cluster
+AA-GEN-2\tAl Ahsa Health Cluster
+AA-GEN-3\tAl Ahsa Health Cluster
+AA-GEN-4\tAl Ahsa Health Cluster
+AA-GEN-5\tAl Ahsa Health Cluster
+AA-GEN-6\tAl Ahsa Health Cluster
+AA-GEN-7\tAl Ahsa Health Cluster
+AA-GEN-8\tAl Ahsa Health Cluster
+AA-MCH-1\tAl Ahsa Health Cluster
+AS-GEN-1\tAsir RHD
+AS-GEN-10\tAsir RHD
+AS-GEN-11\tAsir RHD
+AS-GEN-12\tAsir RHD
+AS-GEN-13\tAsir RHD
+AS-GEN-14\tAsir RHD
+AS-GEN-15\tAsir RHD
+AS-GEN-16\tAsir RHD
+AS-GEN-17\tAsir RHD
+AS-GEN-18\tAsir RHD
+AS-GEN-2\tAsir RHD
+AS-GEN-3\tAsir RHD
+AS-GEN-4\tAsir RHD
+AS-GEN-5\tAsir RHD
+AS-GEN-6\tAsir RHD
+AS-GEN-7\tAsir RHD
+AS-GEN-8\tAsir RHD
+AS-GEN-9\tAsir RHD
+AS-MCH-1\tAsir RHD
+AS-MCH-2\tAsir RHD
+BA-GEN-1\tBaha RHD
+BA-GEN-2\tBaha RHD
+BA-GEN-3\tBaha RHD
+BA-GEN-4\tBaha RHD
+BA-GEN-5\tBaha RHD
+BA-GEN-6\tBaha RHD
+BA-GEN-7\tBaha RHD
+BA-GEN-8\tBaha RHD
+BH-GEN-1\tAsir RHD
+BH-GEN-2\tAsir RHD
+BH-GEN-3\tAsir RHD
+BH-GEN-4\tAsir RHD
+BH-GEN-5\tAsir RHD
+BH-GEN-6\tAsir RHD
+BH-MCH-1\tAsir RHD
+C1-GEN-1\tRiyadh First Health Cluster
+C1-GEN-10\tRiyadh First Health Cluster
+C1-GEN-2\tRiyadh First Health Cluster
+C1-GEN-3\tRiyadh First Health Cluster
+C1-GEN-4\tRiyadh First Health Cluster
+C1-GEN-5\tRiyadh First Health Cluster
+C1-GEN-6\tRiyadh First Health Cluster
+C1-GEN-7\tRiyadh First Health Cluster
+C1-GEN-8\tRiyadh First Health Cluster
+C1-GEN-9\tRiyadh First Health Cluster
+C1-MDC-1\tRiyadh First Health Cluster
+C2-GEN-1\tRiyadh Second Health Cluster
+C2-GEN-2\tRiyadh Second Health Cluster
+C2-GEN-3\tRiyadh Second Health Cluster
+C2-GEN-4\tRiyadh Second Health Cluster
+C2-GEN-5\tRiyadh Second Health Cluster
+C2-MCH-1\tRiyadh Second Health Cluster
+C2-MDC-1\tRiyadh Second Health Cluster
+C3-GEN-1\tQassim Health Cluster
+C3-GEN-10\tQassim Health Cluster
+C3-GEN-11\tQassim Health Cluster
+C3-GEN-12\tQassim Health Cluster
+C3-GEN-13\tQassim Health Cluster
+C3-GEN-14\tQassim Health Cluster
+C3-GEN-15\tQassim Health Cluster
+C3-GEN-16\tQassim Health Cluster
+C3-GEN-17\tQassim Health Cluster
+C3-GEN-2\tQassim Health Cluster
+C3-GEN-3\tQassim Health Cluster
+C3-GEN-4\tQassim Health Cluster
+C3-GEN-5\tQassim Health Cluster
+C3-GEN-6\tQassim Health Cluster
+C3-GEN-7\tQassim Health Cluster
+C3-GEN-8\tQassim Health Cluster
+C3-GEN-9\tQassim Health Cluster
+C3-MCH-1\tQassim Health Cluster
+E1-GEN-1\tEastern Health Cluster
+E1-GEN-10\tEastern Health Cluster
+E1-GEN-11\tEastern Health Cluster
+E1-GEN-12\tEastern Health Cluster
+E1-GEN-13\tEastern Health Cluster
+E1-GEN-14\tEastern Health Cluster
+E1-GEN-15\tEastern Health Cluster
+E1-GEN-16\tEastern Health Cluster
+E1-GEN-17\tEastern Health Cluster
+E1-GEN-18\tEastern Health Cluster
+E1-GEN-2\tEastern Health Cluster
+E1-GEN-3\tEastern Health Cluster
+E1-GEN-4\tEastern Health Cluster
+E1-GEN-5\tEastern Health Cluster
+E1-GEN-6\tEastern Health Cluster
+E1-GEN-7\tEastern Health Cluster
+E1-GEN-8\tEastern Health Cluster
+E1-GEN-9\tEastern Health Cluster
+E1-MCH-1\tEastern Health Cluster
+E1-MDC-1\tEastern Health Cluster
+HA-GEN-1\tHail Health Cluster
+HA-GEN-10\tHail Health Cluster
+HA-GEN-11\tHail Health Cluster
+HA-GEN-12\tHail Health Cluster
+HA-GEN-2\tHail Health Cluster
+HA-GEN-3\tHail Health Cluster
+HA-GEN-4\tHail Health Cluster
+HA-GEN-5\tHail Health Cluster
+HA-GEN-6\tHail Health Cluster
+HA-GEN-7\tHail Health Cluster
+HA-GEN-8\tHail Health Cluster
+HA-GEN-9\tHail Health Cluster
+HA-MCH-1\tHail Health Cluster
+HB-GEN-1\tHafer Al Batin RHD
+HB-GEN-2\tHafer Al Batin RHD
+HB-GEN-3\tHafer Al Batin RHD
+HB-GEN-4\tHafer Al Batin RHD
+HB-MCH-1\tHafer Al Batin RHD
+JD-GEN-1\tJeddah Second Health Cluster
+JD-GEN-2\tJeddah Second Health Cluster
+JD-GEN-3\tJeddah Second Health Cluster
+JD-GEN-4\tJeddah First Health Cluster
+JD-GEN-5\tJeddah First Health Cluster
+JD-GEN-6\tJeddah First Health Cluster
+JD-GEN-7\tJeddah First Health Cluster
+JD-GEN-8\tJeddah Second Health Cluster
+JD-GEN-9\tJeddah First Health Cluster
+JD-MCH-1\tJeddah Second Health Cluster
+JF-GEN-1\tAl Jouf RHD
+JF-GEN-2\tAl Jouf RHD
+JF-GEN-3\tAl Jouf RHD
+JF-GEN-4\tAl Jouf RHD
+JF-GEN-5\tAl Jouf RHD
+JF-GEN-6\tAl Jouf RHD
+JF-GEN-7\tAl Jouf RHD
+JF-GEN-8\tAl Jouf RHD
+JF-GEN-9\tAl Jouf RHD
+JF-MCH-1\tAl Jouf RHD
+JZ-GEN-1\tJizan RHD
+JZ-GEN-10\tJizan RHD
+JZ-GEN-11\tJizan RHD
+JZ-GEN-12\tJizan RHD
+JZ-GEN-13\tJizan RHD
+JZ-GEN-14\tJizan RHD
+JZ-GEN-15\tJizan RHD
+JZ-GEN-16\tJizan RHD
+JZ-GEN-17\tJizan RHD
+JZ-GEN-18\tJizan RHD
+JZ-GEN-19\tJizan RHD
+JZ-GEN-2\tJizan RHD
+JZ-GEN-20\tJizan RHD
+JZ-GEN-3\tJizan RHD
+JZ-GEN-4\tJizan RHD
+JZ-GEN-5\tJizan RHD
+JZ-GEN-6\tJizan RHD
+JZ-GEN-7\tJizan RHD
+JZ-GEN-8\tJizan RHD
+JZ-GEN-9\tJizan RHD
+MD-GEN-1\tMadinah Health Cluster
+MD-GEN-10\tMadinah Health Cluster
+MD-GEN-11\tMadinah Health Cluster
+MD-GEN-12\tMadinah Health Cluster
+MD-GEN-13\tMadinah Health Cluster
+MD-GEN-14\tMadinah Health Cluster
+MD-GEN-15\tMadinah Health Cluster
+MD-GEN-16\tMadinah Health Cluster
+MD-GEN-2\tMadinah Health Cluster
+MD-GEN-3\tMadinah Health Cluster
+MD-GEN-4\tMadinah Health Cluster
+MD-GEN-6\tMadinah Health Cluster
+MD-GEN-7\tMadinah Health Cluster
+MD-GEN-8\tMadinah Health Cluster
+MD-GEN-9\tMadinah Health Cluster
+MD-MCH-1\tMadinah Health Cluster
+MD-MDC-1\tMadinah Health Cluster
+NB-GEN-1\tNorthern Border RHD
+NB-GEN-2\tNorthern Border RHD
+NB-GEN-3\tNorthern Border RHD
+NB-GEN-4\tNorthern Border RHD
+NB-GEN-5\tNorthern Border RHD
+NB-GEN-6\tNorthern Border RHD
+NB-GEN-7\tNorthern Border RHD
+NB-MCH-1\tNorthern Border RHD
+NB-MCH-2\tNorthern Border RHD
+NJ-GEN-1\tNajran RHD
+NJ-GEN-2\tNajran RHD
+NJ-GEN-3\tNajran RHD
+NJ-GEN-4\tNajran RHD
+NJ-GEN-5\tNajran RHD
+NJ-GEN-6\tNajran RHD
+NJ-GEN-7\tNajran RHD
+NJ-GEN-8\tNajran RHD
+NJ-MCH-1\tNajran RHD
+NJ-MEN-1\tNajran RHD
+QN-GEN-1\tMakkah Health Cluster
+QN-GEN-2\tMakkah Health Cluster
+QN-GEN-3\tMakkah Health Cluster
+QN-GEN-4\tMakkah Health Cluster
+QN-GEN-5\tMakkah Health Cluster
+QR-GEN-1\tAl Jouf RHD
+QR-GEN-2\tAl Jouf RHD
+QR-GEN-3\tAl Jouf RHD
+RH-GEN-1\tRiyadh First Health Cluster
+RH-GEN-10\tRiyadh Third Health Cluster
+RH-GEN-11\tRiyadh Third Health Cluster
+RH-GEN-12\tRiyadh Third Health Cluster
+RH-GEN-13\tRiyadh Third Health Cluster
+RH-GEN-14\tRiyadh Second Health Cluster
+RH-GEN-15\tRiyadh Third Health Cluster
+RH-GEN-16\tRiyadh Third Health Cluster
+RH-GEN-17\tRiyadh Third Health Cluster
+RH-GEN-18\tRiyadh Third Health Cluster
+RH-GEN-19\tRiyadh Third Health Cluster
+RH-GEN-2\tRiyadh Second Health Cluster
+RH-GEN-20\tRiyadh Third Health Cluster
+RH-GEN-21\tRiyadh Third Health Cluster
+RH-GEN-22\tRiyadh Third Health Cluster
+RH-GEN-23\tRiyadh Third Health Cluster
+RH-GEN-3\tRiyadh Second Health Cluster
+RH-GEN-5\tRiyadh First Health Cluster
+RH-GEN-6\tRiyadh First Health Cluster
+RH-GEN-7\tRiyadh First Health Cluster
+RH-GEN-9\tRiyadh First Health Cluster
+RH-MCH-1\tRiyadh First Health Cluster
+TB-GEN-1\tTabuk RHD
+TB-GEN-10\tTabuk RHD
+TB-GEN-11\tTabuk RHD
+TB-GEN-2\tTabuk RHD
+TB-GEN-3\tTabuk RHD
+TB-GEN-4\tTabuk RHD
+TB-GEN-5\tTabuk RHD
+TB-GEN-6\tTabuk RHD
+TB-GEN-7\tTabuk RHD
+TB-GEN-8\tTabuk RHD
+TB-GEN-9\tTabuk RHD
+TB-MCH-1\tTabuk RHD
+TF-GEN-1\tTaif RHD
+TF-GEN-10\tTaif RHD
+TF-GEN-11\tTaif RHD
+TF-GEN-12\tTaif RHD
+TF-GEN-13\tTaif RHD
+TF-GEN-2\tTaif RHD
+TF-GEN-3\tTaif RHD
+TF-GEN-4\tTaif RHD
+TF-GEN-5\tTaif RHD
+TF-GEN-6\tTaif RHD
+TF-GEN-7\tTaif RHD
+TF-GEN-8\tTaif RHD
+TF-GEN-9\tTaif RHD
+TF-MCH-1\tTaif RHD
+W1-GEN-1\tMakkah Health Cluster
+W1-GEN-2\tMakkah Health Cluster
+W1-GEN-3\tMakkah Health Cluster
+W1-GEN-4\tMakkah Health Cluster
+W1-GEN-5\tMakkah Health Cluster
+W1-GEN-6\tMakkah Health Cluster
+W1-GEN-7\tMakkah Health Cluster
+W1-MCH-1\tMakkah Health Cluster
+W1-MDC-1\tMakkah Health Cluster
+"""
 
-    if len(df.columns) != len(COL_NAMES):
-        raise ValueError(
-            f"Column count mismatch: Excel has {len(df.columns)} columns, "
-            f"but COL_NAMES has {len(COL_NAMES)}."
-        )
+# ══════════════════════════════════════════════════════════════════════════════
+# EMBEDDED HOSPITAL NAME TABLE  (hospital code → hospital name)
+# ══════════════════════════════════════════════════════════════════════════════
 
-    df.columns = COL_NAMES
+_HOSPITAL_NAME_TSV = """\
+Hospital Code\tHospital Name
+AA-GEN-1\tKing Fahad Central Hospital In Hafouf
+AA-GEN-2\tPrince Saud Bin Jalloway Hospital
+AA-GEN-3\tAl-Jabr ENT and Eye Hospital
+AA-MCH-1\tMaternity & Children Hospital in Hassa
+AA-GEN-4\tPrince Sultan Center
+AA-GEN-5\tKing Faisal Hospital in Hassa
+AA-GEN-6\tAlamaraan Hospital in Hassa
+AA-GEN-8\tMadinat Alayon General Hospital
+AS-GEN-1\tAsir Central Hospital
+AS-GEN-10\tUhod Rafidah General Hospital
+AS-GEN-2\tMahayel General Hospital
+AS-GEN-3\tKhamis Mushayt General Hospital
+AS-GEN-4\tSarat Ubaida General Hospital
+AS-GEN-5\tDhahran Al-JaNOab General Hospital
+AS-GEN-6\tAl-Namas General Hospital
+AS-GEN-7\tBllsamar General Hospital
+AS-GEN-8\tAl-Majardah General Hospital
+AS-GEN-9\tRejal Almaa General Hospital
+AS-MCH-1\tKhamis Mushayt Maternity Hospital
+AS-MCH-2\tMaternity & Children's Hospital in Abha
+AS-GEN-14\tBallahmar Hospital
+BA-GEN-1\tPrince Meshari Bin Saud General Hospital
+BA-GEN-2\tKing Fahad Hospital in Al-Bahah
+BA-GEN-3\tAlmakhawa General Hospital
+BA-GEN-4\tQlwa General Hospital
+BA-GEN-5\tAlmndiq General Hospital
+BA-GEN-7\tAlaqiq General Hospital
+BA-GEN-8\tAlqraa Hospital
+BH-GEN-1\tKing Abdullah Hospital in Beshah
+BH-GEN-2\tTathleeth General Hospital
+BH-GEN-4\tSabt Alalaya General Hospital
+BH-GEN-5\tBasher General Hospital
+BH-MCH-1\tMaternity & Children's Hospital in Bishah
+HA-GEN-1\tKing Khaled Hospital in Hail
+HA-GEN-2\tHail General Hospital
+HA-GEN-3\tKing Salman Specialized Hospital
+HA-MCH-1\tMaternity and Children Hospital
+HA-GEN-10\tAlshnan General Hospital
+HA-GEN-11\tAlhaeit Hospital
+HA-GEN-4\tAlsleimi General Hospital
+HA-GEN-5\tAlshamly General Hospital
+HA-GEN-6\tMuqaq General Hospital
+HA-GEN-7\tAlbaqa'a General Hospital
+HA-GEN-8\tSameraa General Hospital
+HA-GEN-9\tAlghazalah Hospital
+HA-GEN-12\tCardiac center in hail
+HB-GEN-1\tKing Khaled Hospital in Hafer Al-Baten
+HB-GEN-2\tHafer Al Batin Central hospital
+HB-MCH-1\tMaternity and Children Hospital
+JD-GEN-1\tKing Fahad Hospital
+JD-GEN-2\tKing Abdullah Medical Complex (NOrthern Jeddah)
+JD-GEN-3\tRabigh General Hospital
+JD-GEN-4\tEast Jeddah Hospital
+JD-GEN-5\tAl-Thagher General Hospital
+JD-GEN-6\tKing Abdul Aziz Hospital and Oncology Center in Jeddah
+JD-GEN-7\tAdhom General Hospital
+JD-GEN-8\tEye Hospital in Jeddah
+JD-GEN-9\tAl-leith Hospital
+JD-MCH-1\tMaternity & Children's Hospital in the north
+JF-GEN-1\tPrince Moteb bin Abdulaziz Hospital
+JF-GEN-2\tTabarjal General Hospital
+JF-GEN-3\tDomat Al-Jandal General Hospital
+JF-GEN-4\tKing Abdulaziz Specialist Hospital in Jouf
+JF-MCH-1\tMaternity & Children Hospital in Skaka Jouf
+JF-GEN-5\tSoder General Hospital
+JF-GEN-8\tCardiology Hospital
+JZ-GEN-1\tPrince Mohammed bin Nasser Hospital
+JZ-GEN-2\tSametah General Hospital
+JZ-GEN-3\tSabya General Hospital
+JZ-GEN-4\tAbu Arish General Hospital
+JZ-GEN-5\tBesh General hospital
+JZ-GEN-6\tKing Fahd Central Hospital in Jazan
+JZ-GEN-10\tAlaarda General Hospital
+JZ-GEN-12\tAldarb General Hospital
+JZ-GEN-13\tAltawal General Hospital
+JZ-GEN-14\tAhad Almassarha General Hospital
+JZ-GEN-15\tAlmossem General Hospital
+JZ-GEN-16\tBani Malik Hospital
+JZ-GEN-17\tDamad General Hospital
+JZ-GEN-19\tAlkhobah Hospital (Alharth)
+JZ-GEN-20\tAledabi Hospital
+JZ-GEN-7\tJazan General Hospital
+JZ-GEN-8\tAlfursan General Hospital
+JZ-GEN-9\tFefa General Hospital
+MD-GEN-1\tKing Fahad Hospital
+MD-GEN-2\tYanbu General Hospital
+MD-GEN-3\tUhod General Hospital
+MD-GEN-4\tPrince Abdul Mohsen Hospital Al-Ola
+MD-GEN-6\tKhayber General Hospital
+MD-MDC-1\tKing Salman Bin Abdulaziz Medical City
+MD-GEN-10\tBader General Hospital
+MD-GEN-11\tAlhnakiyah General Hospital
+MD-GEN-12\tAlaeis General Hospital
+MD-GEN-13\tWadi Alfarie General Hospital
+MD-GEN-14\tAlhmnah Hospital
+MD-GEN-15\tAlhasso Hospital
+MD-GEN-16\tYanbu Alnakhel Hospital
+MD-GEN-7\tCardiology Hospital
+MD-GEN-8\tAlmiqat General Hospital
+MD-GEN-9\tAlmahd General Hospital
+NB-GEN-1\tArar Central Hospital
+NB-GEN-2\tTarif General Hospital
+NB-GEN-3\tPrince Abdulaziz Bin Mosaad Bin Jalloway Hospital
+NB-GEN-4\tRafha General Hospital
+NB-MCH-1\tMaternity & Children Hospital in Arar
+NB-GEN-5\tAlaoiqilh Hospital
+NB-GEN-6\tSho'bah General Hospital
+NB-GEN-7\tJadidah Arar Hospital
+NB-MCH-2\tMaternity & Children Hospital in Rafha
+NJ-GEN-1\tKing Khaled Hospital in Najran
+NJ-GEN-2\tNajran General Hospital
+NJ-GEN-3\tSharorah General Hospital
+NJ-MCH-1\tMaternity and Children Hospital
+QN-GEN-1\tAl-Qunfudah General Hospital
+QN-GEN-2\tSouth Qunfudah Hospital
+QN-GEN-3\tTripan Hospital
+QN-GEN-4\tAL-Mezailef General Hospital
+QN-GEN-5\tNamirah General Hospital
+QR-GEN-1\tAl-Qrayat General Hospital
+RH-GEN-1\tKing Khalid Hospital Kharj
+RH-GEN-10\tDawadmi Hospital
+RH-GEN-11\tShaqraa Hospital
+RH-GEN-12\tAfif Hospital
+RH-GEN-13\tHemaymlah Hospital
+RH-GEN-14\tHotat Sedir Hospital
+RH-GEN-2\tKing Khalid Hospital Magmah
+RH-GEN-3\tZulfi Hospital
+RH-GEN-5\tGoeyah Hospital
+RH-GEN-6\tWadi Adwaser Hospital
+RH-GEN-7\tAflaj Hospital
+RH-GEN-9\tHotat Tamem Hospital
+RH-MCH-1\tChildren and Delivery Hospital Kharj
+RH-GEN-15\tAlderiyadh Hospital
+RH-GEN-16\tAlthadek Hospital
+RH-GEN-17\tAlsajer Hospital
+RH-GEN-18\tAlnafee Hospital
+RH-GEN-19\tAlwathlyan Hospital
+RH-GEN-20\tAlrafyie Hospital in Jamash
+RH-GEN-22\tAldrma Hospital
+TB-GEN-1\tKing Khalid Hospital in Tabuk
+TB-GEN-2\tAlwagh General Hospital
+TB-GEN-3\tTemaa General Hospital
+TB-GEN-4\tHagh General Hospital
+TB-GEN-5\tOmlog General Hospital
+TB-GEN-6\tDubaa General Hospital
+TB-GEN-7\tKing Fahad Specialized Hospital in Tabuk
+TB-MCH-1\tChildren & Delivery Hospital in Tabuk
+TF-GEN-1\tKing Faisal Hospital in Taif
+TF-GEN-2\tKing Abdulaziz Specialist Hospital in Taif
+TF-MCH-1\tMaternity Hospital in Taif
+TF-GEN-10\tThelim Hospital
+TF-GEN-11\tQiya Balhareth Hospital
+TF-GEN-13\tAlmahani Hospital
+TF-GEN-3\tAlkhurma General Hospital
+TF-GEN-4\tMeisan Balhareth General Hospital
+TF-GEN-5\tRnyah General Hospital
+TF-GEN-6\tTurba General Hospital
+TF-GEN-7\tAlkhurei Bni Malik General Hospital
+TF-GEN-8\tSlsahin Bin Saad General Hospital
+TF-GEN-9\tAlmoya Hospital
+TF-GEN-12\tUm Aldoum Hospital
+C1-GEN-1\tKing Salman Bin Abdulaziz Hospital
+C1-GEN-2\tAl Iman General Hospital
+C1-GEN-3\tAl Imam Abdul Rahman Al Faisal Hospital
+C1-MDC-1\tGeneral Hospital King Saud Medical City
+C1-GEN-10\tAlrein Hospital
+C1-GEN-4\tAlsuliel Hospital
+C1-GEN-5\tRweidha Alaard Hospital
+C1-GEN-6\tAlmuzahmiyah Hospital
+C1-GEN-7\tPrince Salman bin Mohammed Hospital (Aldlim)
+C1-GEN-8\tAlhuraig Hospital
+C1-GEN-9\tAlkhaseira Hospital
+C2-GEN-1\tPrince Mohammed bin Abdul Aziz Hospital
+C2-MCH-1\tAl Yamamah Hospital
+C2-MDC-1\tKing Fahad Medical City
+C2-GEN-2\tAlrumah Hospital
+C2-GEN-3\tTumeir Hospital
+C2-GEN-4\tAlghat Hospital
+C2-GEN-5\tAlartauya Hospital
+C3-GEN-1\tBuraydah Central Hospital
+C3-GEN-2\tKing Saud Hospital in Oniazah
+C3-GEN-3\tAl-Rass General Hospital
+C3-GEN-4\tAl-Bikeriah General Hospital
+C3-GEN-5\tAl-Mothneb General Hospital
+C3-GEN-6\tAl-Badaa General Hospital
+C3-GEN-7\tKing Fahd Specialist Hospital in Buraydah
+C3-MCH-1\tMaternity and Children Hospital in Qassim
+C3-GEN-11\tAyoon Aljwaa General Hospital
+C3-GEN-12\tRyad alkhubraa General Hospital
+C3-GEN-13\tAkla alsagoor General Hospital
+C3-GEN-14\tdarba General Hospital
+C3-GEN-15\tAlasyah Hospital
+C3-GEN-16\tAlnabhaniya Hospital
+C3-GEN-17\tAlqwara Hospital
+C3-GEN-8\tCardiology Hospital
+E1-GEN-1\tDammam Medical Complex
+E1-GEN-2\tAl Qatif Central Hospital
+E1-GEN-3\tAl-Jubail General Hospital
+E1-GEN-4\tAl Khafji General Hospital
+E1-MCH-1\tMaternity and Children Hospital in Dammam
+E1-MDC-1\tKing Fahad Specialist Hospital in Dammam (KFSH-D)
+E1-GEN-10\tAlrafyie General Hospital
+E1-GEN-13\tPrince Sultan Hospial in Bmleja
+E1-GEN-14\tPrince Sultan Hospital in Bariera
+E1-GEN-15\tAlqarya alalya Hospital
+E1-GEN-16\tRas Tanoura Hospital
+E1-GEN-18\tSalwa Hospital
+E1-GEN-5\tBabtin Hospital
+E1-GEN-6\tPrince Mohammed bin Fahad General Hospital
+E1-GEN-7\tAlthahran Altkhasusi Hospital
+E1-GEN-8\tAlnaariyah General Hospital
+E1-GEN-9\tAlbakek General Hospital
+W1-GEN-1\tKing Abdulaziz Hospital in Makkah
+W1-GEN-2\tKing Faisal Hospital in Makkah
+W1-GEN-3\tHera General Hospital
+W1-GEN-4\tAl-NOor Specialist Hospital
+W1-MCH-1\tMaternity & Children's Hospital in Makkah
+W1-MDC-1\tKing Abdullah Medical City
+W1-GEN-5\tAlkhulais Hospital
+W1-GEN-6\tAlkamel Hospital
+"""
 
-    for c in NUM_COLS:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+# ══════════════════════════════════════════════════════════════════════════════
+# SHARED KEY HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def read_upload(uploaded_file, session_key):
+def get_embedded_key() -> tuple[dict, pd.DataFrame]:
+    """Parse the embedded TSV and return (key_map, key_df)."""
+    df = pd.read_csv(io.StringIO(_EMBEDDED_KEY_TSV), sep="\t", dtype=str)
+    df.columns = ["Hospital Code", "Directorate"]
+    df = df.dropna(subset=["Hospital Code", "Directorate"])
+    df["Hospital Code"] = df["Hospital Code"].str.strip().str.upper()
+    df["Directorate"]   = df["Directorate"].str.strip()
+    key_map = dict(zip(df["Hospital Code"], df["Directorate"]))
+    return key_map, df
+
+
+def get_hospital_name_map() -> dict:
+    """Return the embedded hospital code → hospital name lookup dict."""
+    df = pd.read_csv(io.StringIO(_HOSPITAL_NAME_TSV), sep="\t", dtype=str)
+    df["Hospital Code"] = df["Hospital Code"].str.strip().str.upper()
+    df["Hospital Name"] = df["Hospital Name"].str.strip()
+    return dict(zip(df["Hospital Code"], df["Hospital Name"]))
+
+
+def load_key_from_file(
+    key_path: str | None = None,
+    search_folder: str | None = None,
+) -> tuple[dict | None, pd.DataFrame | None]:
     """
-    Read an uploaded file's bytes immediately and cache them in session_state.
-    This prevents the 403 error that occurs when Streamlit tries to re-read
-    a file object on subsequent script reruns after the upload has expired.
+    Try to load an external Key sheet to override the embedded key.
+    Priority: explicit --key path → any file in search_folder with a 'Key' sheet.
     """
-    if uploaded_file is not None:
-        file_id = f"{uploaded_file.name}_{uploaded_file.size}"
-        if session_key not in st.session_state or st.session_state.get(f"{session_key}_id") != file_id:
-            st.session_state[session_key] = uploaded_file.read()
-            st.session_state[f"{session_key}_id"] = file_id
-            st.session_state[f"{session_key}_name"] = uploaded_file.name
-        return st.session_state[session_key], st.session_state[f"{session_key}_name"]
-    for k in [session_key, f"{session_key}_id", f"{session_key}_name"]:
-        st.session_state.pop(k, None)
+    candidates = []
+    if key_path:
+        candidates.append(key_path)
+    if search_folder and os.path.isdir(search_folder):
+        for fname in sorted(os.listdir(search_folder)):
+            if fname.endswith((".xlsx", ".xlsm")) and not fname.startswith("~$"):
+                candidates.append(os.path.join(search_folder, fname))
+
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            xl = pd.ExcelFile(path)
+            if "Key" not in xl.sheet_names:
+                continue
+            key_df = pd.read_excel(path, sheet_name="Key", header=0)
+            key_df = key_df.iloc[:, :2].copy()
+            key_df.columns = ["Hospital Code", "Directorate"]
+            key_df = key_df.dropna(subset=["Hospital Code", "Directorate"])
+            key_df["Hospital Code"] = key_df["Hospital Code"].astype(str).str.strip().str.upper()
+            key_df = key_df[key_df["Hospital Code"].str.contains("-")]
+            if len(key_df) == 0:
+                continue
+            key_map = dict(zip(key_df["Hospital Code"], key_df["Directorate"]))
+            logging.info(
+                f"Key sheet override from: {os.path.basename(path)} ({len(key_map)} hospitals)"
+            )
+            return key_map, key_df
+        except Exception:
+            continue
     return None, None
 
-def filter_df(df, dirs=None, hospitals=None, specs=None, statuses=None):
-    mask = pd.Series(True, index=df.index)
-
-    if dirs:
-        mask = mask & df["Directorate"].isin(dirs)
-
-    if hospitals:
-        mask = mask & df["Hospital_Name"].isin(hospitals)
-
-    if specs:
-        mask = mask & df["Specialty"].isin(specs)
-
-    if statuses:
-        include_na = "N/A" in statuses
-        status_vals = [s for s in statuses if s != "N/A"]
-
-        if status_vals and include_na:
-            mask = mask & (df["Status"].isin(status_vals) | df["Status"].isna())
-        elif status_vals:
-            mask = mask & df["Status"].isin(status_vals)
-        elif include_na:
-            mask = mask & df["Status"].isna()
-
-    return df[mask]
-
-# ── SIDEBAR ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.title("OR Dashboard")
-    st.markdown("---")
-
-    st.subheader("File 1 — Primary")
-    up1 = st.file_uploader("Upload primary file (.xlsx)", type=["xlsx"], key="f1")
-
-    st.subheader("File 2 — Comparison (optional)")
-    up2 = st.file_uploader(
-        "Upload comparison file (.xlsx)", type=["xlsx"], key="f2",
-        help="Upload a second Aggregated file to compare week-over-week or version differences",
-    )
-
-    bytes1, name1 = read_upload(up1, "bytes_f1")
-    bytes2, name2 = read_upload(up2, "bytes_f2")
-
-    if bytes1 is not None:
-        df1_raw = load_bytes(bytes(bytes1))
-        label1 = name1
-        st.success(f"✓ File 1 loaded — {len(df1_raw):,} rows")
-    else:
-        try:
-            df1_raw = load_path("Aggregated_Specialty_Level.xlsx")
-            label1 = "Default aggregated file"
-            st.info("File 1: using default file in same folder.")
-        except Exception:
-            st.warning("⚠️ Upload your Aggregated Excel file to begin.")
-            st.stop()
-
-    df2_raw = None
-    label2 = None
-    if bytes2 is not None:
-        df2_raw = load_bytes(bytes(bytes2))
-        label2 = name2
-        st.success(f"✓ File 2 loaded — {len(df2_raw):,} rows")
-
-    st.markdown("---")
-    st.subheader("Filters")
-
-    # ── 1) Directorate options from full data
-    dir_options = sorted(df1_raw["Directorate"].dropna().unique().tolist())
-    sel_dir = st.multiselect("Directorate", dir_options, default=dir_options)
-
-    # ── 2) Hospital options depend on selected Directorate
-    df_for_hospital = filter_df(df1_raw, dirs=sel_dir)
-    hospital_options = sorted(df_for_hospital["Hospital_Name"].dropna().unique().tolist())
-    sel_hosp = st.multiselect("Hospital Name", hospital_options, default=hospital_options)
-
-    # ── 3) Specialty options depend on Directorate + Hospital
-    df_for_specialty = filter_df(df1_raw, dirs=sel_dir, hospitals=sel_hosp)
-    spec_options = sorted(df_for_specialty["Specialty"].dropna().unique().tolist())
-    sel_spec = st.multiselect("Specialty", spec_options, default=spec_options)
-
-    # ── 4) Status options depend on Directorate + Hospital + Specialty
-    df_for_status = filter_df(df1_raw, dirs=sel_dir, hospitals=sel_hosp, specs=sel_spec)
-    status_series = df_for_status["Status"].copy()
-    if status_series.isna().any():
-        status_options = sorted(status_series.dropna().unique().tolist()) + ["N/A"]
-    else:
-        status_options = sorted(status_series.dropna().unique().tolist())
-
-    default_status = [s for s in ["Available", "On Hold"] if s in status_options]
-    if not default_status:
-        default_status = status_options
-
-    sel_status = st.multiselect("Status", status_options, default=default_status)
-
-    st.markdown("---")
-    st.caption("OR Analytics · Filters apply to all tabs")
-
-# ── APPLY FILTERS ─────────────────────────────────────────────────────────────
-df1 = filter_df(
-    df1_raw,
-    dirs=sel_dir,
-    hospitals=sel_hosp,
-    specs=sel_spec,
-    statuses=sel_status
-)
-avail1 = df1[df1["Status"] == "Available"]
-
-if df2_raw is not None:
-    df2 = filter_df(
-        df2_raw,
-        dirs=sel_dir,
-        hospitals=sel_hosp,
-        specs=sel_spec,
-        statuses=sel_status
-    )
-    avail2 = df2[df2["Status"] == "Available"]
-    comparing = True
-else:
-    df2 = None
-    avail2 = None
-    comparing = False
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ADD SPACE BEFORE TABS
+# SHEET NAME RESOLUTION HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
-st.markdown("<div style='height:25px;'></div>", unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TABS
-# ══════════════════════════════════════════════════════════════════════════════
-if comparing:
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
-        "Overview",
-        "Waiting List",
-        "Surgical Activity",
-        "OR Rooms",
-        "Hospital Explorer",
-        "File Comparison",
-        "Weekly-Executive",
-        "Weekly-Specialty",
-        "High Level Table",
-    ])
-else:
-    tab1, tab2, tab3, tab4, tab5, tab7, tab8, tab9 = st.tabs([
-        "Overview",
-        "Waiting List",
-        "Surgical Activity",
-        "OR Rooms",
-        "Hospital Explorer",
-        "Weekly-Executive",
-        "Weekly-Specialty",
-        "High Level Table",
-    ])
-    tab6 = None
+def _resolve_sheet(sheet_names: list[str], aliases: list[str], fuzzy_keyword: str) -> str | None:
+    for alias in aliases:
+        if alias in sheet_names:
+            return alias
+    for name in sheet_names:
+        if fuzzy_keyword.lower() in name.lower():
+            return name
+    return None
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 1  OVERVIEW
-# ══════════════════════════════════════════════════════════════════════════════
-with tab1:
-    st.header("Executive Overview")
-    if comparing:
-        st.caption(f"File 1: **{label1}**   |   File 2: **{label2}**")
 
-    def kpi_row(av, av2=None):
-        wl = av["WL_Total"].sum()
-        surg = av["Total_Surg"].sum()
-        nh = av["Hospital_Name"].nunique()
-        wait = av["Days_2nd_Slot"].mean()
+def find_waiting_time_sheet(sheet_names: list[str]) -> str | None:
+    for alias in WAITING_TIME_ALIASES:
+        if alias in sheet_names:
+            return alias
+    for name in sheet_names:
+        if "waiting" in name.lower():
+            return name
+    return None
 
-        def delta(v1, v2):
-            if v2 is None or pd.isna(v2):
-                return None
-            return f"{v1 - v2:+,.0f}"
 
-        wl2 = av2["WL_Total"].sum() if av2 is not None else None
-        surg2 = av2["Total_Surg"].sum() if av2 is not None else None
-        nh2 = av2["Hospital_Name"].nunique() if av2 is not None else None
-        wait2 = av2["Days_2nd_Slot"].mean() if av2 is not None else None
+def find_kpi_manual_sheet(sheet_names: list[str]) -> str | None:
+    return _resolve_sheet(sheet_names, KPI_MANUAL_ALIASES, "manual")
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total WL Patients", fmt(wl), delta=delta(wl, wl2))
-        c2.metric("Total Surgeries", fmt(surg), delta=delta(surg, surg2))
-        c3.metric("Hospitals Reporting", fmt(nh), delta=delta(nh, nh2))
-        wait_str = f"{wait:.1f}d" if not pd.isna(wait) else "—"
-        wait2_str = f"{wait2 - wait:+.1f}d" if av2 is not None and not pd.isna(wait2) else None
-        c4.metric("Avg Days to Next Slot", wait_str, delta=wait2_str)
-        on_hold_n = (df1["Status"] == "On Hold").sum()
-        c5.metric("Specialties On Hold", fmt(on_hold_n))
 
-    kpi_row(avail1, avail2)
+def find_kpi_it_sheet(sheet_names: list[str]) -> str | None:
+    return _resolve_sheet(sheet_names, KPI_IT_ALIASES, "kpi")
 
-    st.markdown("---")
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Waiting List by Directorate")
-        dir_wl1 = avail1.groupby("Directorate")["WL_Total"].sum().reset_index(name="WL_Total")
-        if comparing:
-            dir_wl2 = avail2.groupby("Directorate")["WL_Total"].sum().reset_index(name="WL_Total2")
-            dir_wl = dir_wl1.merge(dir_wl2, on="Directorate", how="outer").fillna(0)
-            dir_wl = dir_wl.sort_values("WL_Total")
-            fig = go.Figure()
-            fig.add_trace(go.Bar(y=dir_wl["Directorate"], x=dir_wl["WL_Total"],
-                                 name=label1, orientation="h", marker_color=TEAL))
-            fig.add_trace(go.Bar(y=dir_wl["Directorate"], x=dir_wl["WL_Total2"],
-                                 name=label2, orientation="h", marker_color=BLUE, opacity=0.7))
-            fig.update_layout(make_layout({"barmode": "group", "height": 440,
-                                           "legend": dict(orientation="h", y=1.05)}))
-        else:
-            dir_wl = dir_wl1.sort_values("WL_Total")
-            fig = px.bar(dir_wl, x="WL_Total", y="Directorate", orientation="h",
-                         color="WL_Total",
-                         color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-                         labels={"WL_Total": "Patients", "Directorate": ""}, height=440)
-            fig.update_coloraxes(showscale=False)
-            fig.update_layout(make_layout())
-        fig.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with right:
-        st.subheader("Waiting List by Specialty")
-        spec_wl = avail1.groupby("Specialty")["WL_Total"].sum().sort_values(ascending=False).reset_index()
-        fig2 = px.pie(spec_wl, values="WL_Total", names="Specialty", hole=0.42,
-                      color_discrete_sequence=SPEC_COLORS, height=440)
-        fig2.update_traces(textposition="outside", textinfo="percent+label")
-        fig2.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("Specialty Status Distribution by Directorate")
-    sd = df1.copy()
-    sd["Status"] = sd["Status"].fillna("N/A")
-    sc = sd.groupby(["Directorate", "Status"]).size().reset_index(name="Count")
-    fig3 = px.bar(sc, x="Directorate", y="Count", color="Status",
-                  color_discrete_map={"Available": TEAL, "On Hold": AMBER, "N/A": "#D3D1C7"},
-                  barmode="stack", height=360,
-                  labels={"Count": "Specialty Slots", "Directorate": ""})
-    fig3.update_layout(make_layout({"margin": dict(l=0, r=0, t=10, b=90),
-                                    "legend": dict(orientation="h", y=1.05),
-                                    "xaxis_tickangle": -40}))
-    fig3.update_yaxes(gridcolor="#f0f0f0")
-    st.plotly_chart(fig3, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 2  WAITING LIST
+# CELL READING HELPERS  (used by Score processing)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    st.header("Waiting List Deep Dive")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Patients", fmt(avail1["WL_Total"].sum()))
-    c2.metric("Booked within 36 days", fmt(avail1["WL_Booked36"].sum()))
-    c3.metric("Unbooked", fmt(avail1["WL_Unbooked36"].sum()))
-    c4.metric("Non-Scheduled (shortage)", fmt(avail1["WL_NonSched"].sum()))
+def _cell(ws, row: int, col: int):
+    """Read a single openpyxl cell value (1-based). Returns None on error."""
+    try:
+        val = ws.cell(row=row, column=col).value
+        return val
+    except Exception:
+        return None
 
-    st.markdown("---")
-    left, right = st.columns(2)
 
-    with left:
-        st.subheader("Avg Days to 2nd Slot — by Specialty")
-        ws1 = avail1.groupby("Specialty")["Days_2nd_Slot"].mean().sort_values(ascending=False).reset_index()
-        ws1.columns = ["Specialty", "Days"]
-        if comparing:
-            ws2 = avail2.groupby("Specialty")["Days_2nd_Slot"].mean().reset_index()
-            ws2.columns = ["Specialty", "Days2"]
-            ws = ws1.merge(ws2, on="Specialty", how="left")
-            ws = ws.sort_values("Days", ascending=True)
-            fig = go.Figure()
-            fig.add_trace(go.Bar(y=ws["Specialty"], x=ws["Days"],
-                                 name=label1, orientation="h", marker_color=TEAL, text=ws["Days"].round(1),
-                                 texttemplate="%{text:.1f}d", textposition="outside"))
-            fig.add_trace(go.Bar(y=ws["Specialty"], x=ws["Days2"],
-                                 name=label2, orientation="h", marker_color=BLUE, opacity=0.7))
-            fig.update_layout(make_layout({"barmode": "group", "height": 420,
-                                           "margin": dict(l=0, r=60, t=10, b=30),
-                                           "legend": dict(orientation="h", y=1.05)}))
-        else:
-            ws1 = ws1.sort_values("Days", ascending=True)
-            fig = px.bar(ws1, x="Days", y="Specialty", orientation="h", color="Days",
-                         color_continuous_scale=[[0, "#E1F5EE"], [0.5, AMBER], [1, CORAL]],
-                         text="Days", height=420,
-                         labels={"Days": "Avg Days", "Specialty": ""})
-            fig.update_coloraxes(showscale=False)
-            fig.update_traces(texttemplate="%{text:.1f}d", textposition="outside")
-            fig.update_layout(make_layout({"margin": dict(l=0, r=60, t=10, b=30)}))
-        fig.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig, use_container_width=True)
+def _safe_num(val):
+    """Convert cell value to number or None."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return val
+    s = str(val).strip()
+    if s.startswith("#") or s == "":
+        return None
+    try:
+        f = float(s)
+        return int(f) if f == int(f) else f
+    except (ValueError, OverflowError):
+        return None
 
-    with right:
-        st.subheader("WL Volume vs Booking Rate")
-        sc2 = avail1.groupby("Specialty").agg(
-            WL_Total=("WL_Total", "sum"),
-            WL_Booked36=("WL_Booked36", "sum"),
-            Total_Surg=("Total_Surg", "sum"),
-        ).reset_index()
-        sc2["Booked_Rate"] = (sc2["WL_Booked36"] / sc2["WL_Total"] * 100).round(1)
-        sc2 = sc2.dropna(subset=["Booked_Rate"])
-        fig2 = px.scatter(sc2, x="WL_Total", y="Booked_Rate", size="Total_Surg",
-                          color="Specialty", hover_name="Specialty",
-                          color_discrete_sequence=SPEC_COLORS, height=420,
-                          labels={"WL_Total": "Total WL", "Booked_Rate": "% Booked 36d", "Total_Surg": "Surgeries"})
-        fig2.update_layout(make_layout({"showlegend": False}))
-        fig2.update_xaxes(gridcolor="#f0f0f0")
-        fig2.update_yaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("Waiting List Heatmap — Directorate × Specialty")
-    heat = avail1.groupby(["Directorate", "Specialty"])["WL_Total"].sum().reset_index()
-    hpiv = heat.pivot(index="Directorate", columns="Specialty", values="WL_Total").fillna(0)
-    fig3 = px.imshow(hpiv, color_continuous_scale=[[0, "#FFFFFF"], [0.3, "#9FE1CB"], [1, TEAL]],
-                     aspect="auto", height=520, labels=dict(color="Patients"), text_auto=True)
-    fig3.update_layout(margin=dict(l=0, r=0, t=10, b=0))
-    fig3.update_xaxes(tickangle=-35)
-    st.plotly_chart(fig3, use_container_width=True)
+def _safe_str(val) -> str | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    return s if s else None
 
-    st.markdown("---")
-    st.subheader("On Hold Specialties")
-    oh = df1[df1["Status"] == "On Hold"][["Directorate", "Hospital_Name", "Specialty", "WL_Total", "Days_2nd_Slot"]].copy()
-    oh = oh.sort_values("Directorate")
-    oh.columns = ["Directorate", "Hospital Name", "Specialty", "WL Total", "Days to Slot"]
-    st.dataframe(oh.reset_index(drop=True), use_container_width=True, height=260)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 3  SURGICAL ACTIVITY
+# DATE HELPERS  (used by Specialty Level processing)
 # ══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.header("Surgical Activity")
 
-    tot_s = avail1["Total_Surg"].sum()
-    el_s = avail1["Elective_Surg"].sum()
-    od_s = avail1["OnDay_Surg"].sum()
-    od_rt = od_s / tot_s * 100 if tot_s else 0
+def nth_thursday_of_month(month_str: str, year_str: str, week_num: int) -> datetime:
+    dt = datetime.strptime(f"1 {month_str} {year_str}", "%d %B %Y")
+    days_ahead = 3 - dt.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    first_thursday = dt + timedelta(days=days_ahead)
+    return first_thursday + timedelta(weeks=week_num)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Surgeries", fmt(tot_s),
-              delta=fmt(avail2["Total_Surg"].sum()) + " (file 2)" if comparing else None)
-    c2.metric("Elective", fmt(el_s))
-    c3.metric("One-Day (Day Case)", fmt(od_s))
-    c4.metric("Day Case Rate", f"{od_rt:.1f}%")
 
-    st.markdown("---")
-    left, right = st.columns(2)
+def fallback_date_from_summary(wb_path: str) -> datetime | None:
+    try:
+        ss = pd.read_excel(wb_path, sheet_name="Summary Sheet", header=None)
+        month    = str(ss.iloc[7, 2]).strip()
+        year_raw = ss.iloc[8, 2]
+        week_raw = ss.iloc[23, 2]
+        year  = str(int(float(year_raw)))
+        week  = int(float(week_raw))
+        return nth_thursday_of_month(month, year, week)
+    except Exception:
+        return None
 
-    with left:
-        st.subheader("Surgery Mix by Directorate")
-        ds = avail1.groupby("Directorate").agg(
-            Elective=("Elective_Surg", "sum"),
-            OneDay=("OnDay_Surg", "sum"),
-            Total=("Total_Surg", "sum"),
-        ).reset_index()
-        ds["Other"] = (ds["Total"] - ds["Elective"] - ds["OneDay"]).clip(lower=0)
-        ds = ds.sort_values("Elective")
-        fig = go.Figure()
-        fig.add_trace(go.Bar(y=ds["Directorate"], x=ds["Elective"], name="Elective",
-                             orientation="h", marker_color=TEAL))
-        fig.add_trace(go.Bar(y=ds["Directorate"], x=ds["OneDay"], name="One-Day",
-                             orientation="h", marker_color=BLUE))
-        fig.add_trace(go.Bar(y=ds["Directorate"], x=ds["Other"], name="Emergency/Other",
-                             orientation="h", marker_color=CORAL))
-        fig.update_layout(make_layout({"barmode": "stack", "height": 460,
-                                       "legend": dict(orientation="h", y=1.05)}))
-        fig.update_xaxes(gridcolor="#f0f0f0", title="Surgeries")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with right:
-        st.subheader("Surgery Volume by Specialty")
-        ss2 = avail1.groupby("Specialty").agg(
-            Elective=("Elective_Surg", "sum"),
-            OneDay=("OnDay_Surg", "sum"),
-        ).reset_index().sort_values("Elective", ascending=False)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=ss2["Specialty"], y=ss2["Elective"], name="Elective", marker_color=TEAL))
-        fig2.add_trace(go.Bar(x=ss2["Specialty"], y=ss2["OneDay"], name="One-Day", marker_color=BLUE))
-        fig2.update_layout(make_layout({"barmode": "group", "height": 460,
-                                        "margin": dict(l=0, r=0, t=10, b=90),
-                                        "legend": dict(orientation="h", y=1.05),
-                                        "xaxis_tickangle": -40}))
-        fig2.update_yaxes(gridcolor="#f0f0f0", title="Surgeries")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("OR Sessions vs Surgeries — by Directorate")
-    bub = avail1.groupby("Directorate").agg(
-        OR_Sessions=("OR_Sessions", "sum"),
-        Total_Surg=("Total_Surg", "sum"),
-        WL_Total=("WL_Total", "sum"),
-    ).reset_index()
-    fig3 = px.scatter(bub, x="OR_Sessions", y="Total_Surg", size="WL_Total",
-                      color="Directorate", hover_name="Directorate", size_max=50,
-                      color_discrete_sequence=SPEC_COLORS, height=400, text="Directorate",
-                      labels={"OR_Sessions": "OR Sessions/week", "Total_Surg": "Total Surgeries", "WL_Total": "WL Size"})
-    fig3.update_traces(textposition="top center", textfont_size=9)
-    fig3.update_layout(make_layout({"showlegend": False}))
-    fig3.update_xaxes(gridcolor="#f0f0f0")
-    fig3.update_yaxes(gridcolor="#f0f0f0")
-    st.plotly_chart(fig3, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 4  OR ROOMS
+# FILE DETECTION
 # ══════════════════════════════════════════════════════════════════════════════
-with tab4:
-    st.header("OR Rooms & Capacity")
 
-    or_h = df1.groupby(["Hospital", "Hospital_Name"]).agg(
-        NonEm_Func_ORs=("NonEm_Func_ORs", "first"),
-        NonFunc_ORs=("NonFunc_ORs", "first"),
-        Em_ORs=("Em_ORs", "first"),
-        Directorate=("Directorate", "first"),
-    ).reset_index()
+def is_or_data_file(filepath: str) -> tuple[bool, str | None]:
+    """Return (True, wt_sheet_name) if file has Summary Sheet + Waiting Time sheet."""
+    try:
+        sheets = pd.ExcelFile(filepath).sheet_names
+        if "Summary Sheet" not in sheets:
+            return False, None
+        wt_sheet = find_waiting_time_sheet(sheets)
+        return (True, wt_sheet) if wt_sheet else (False, None)
+    except Exception:
+        return False, None
 
-    for c in ["NonEm_Func_ORs", "NonFunc_ORs", "Em_ORs"]:
-        or_h[c] = pd.to_numeric(or_h[c], errors="coerce").fillna(0)
 
-    tot_func = or_h["NonEm_Func_ORs"].sum()
-    tot_nfunc = or_h["NonFunc_ORs"].sum()
-    tot_em = or_h["Em_ORs"].sum()
-    nf_rate = tot_nfunc / (tot_func + tot_nfunc) * 100 if (tot_func + tot_nfunc) else 0
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Functioning ORs (Non-Em)", fmt(tot_func))
-    c2.metric("Non-Functioning ORs", fmt(tot_nfunc))
-    c3.metric("Non-Function Rate", f"{nf_rate:.1f}%")
-    c4.metric("Emergency ORs Reported", fmt(tot_em))
-
-    st.markdown("---")
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("OR Rooms by Directorate")
-        dir_or = or_h.groupby("Directorate")[["NonEm_Func_ORs", "NonFunc_ORs", "Em_ORs"]].sum()
-        dir_or = dir_or.sort_values("NonEm_Func_ORs").reset_index()
-        fig = go.Figure()
-        fig.add_trace(go.Bar(y=dir_or["Directorate"], x=dir_or["NonEm_Func_ORs"],
-                             name="Functioning", orientation="h", marker_color=TEAL))
-        fig.add_trace(go.Bar(y=dir_or["Directorate"], x=dir_or["NonFunc_ORs"],
-                             name="Non-Functioning", orientation="h", marker_color=CORAL))
-        fig.add_trace(go.Bar(y=dir_or["Directorate"], x=dir_or["Em_ORs"],
-                             name="Emergency", orientation="h", marker_color=AMBER))
-        fig.update_layout(make_layout({"barmode": "stack", "height": 480,
-                                       "legend": dict(orientation="h", y=1.05)}))
-        fig.update_xaxes(gridcolor="#f0f0f0", title="OR Rooms")
-        st.plotly_chart(fig, use_container_width=True)
-
-    with right:
-        st.subheader("Non-Functioning OR Rate by Directorate")
-        dir_or["Total"] = dir_or["NonEm_Func_ORs"] + dir_or["NonFunc_ORs"]
-        dir_or["NF_Rate"] = (dir_or["NonFunc_ORs"] / dir_or["Total"] * 100).round(1)
-        dir_or2 = dir_or[dir_or["Total"] > 0].sort_values("NF_Rate", ascending=False)
-        fig2 = px.bar(dir_or2, x="NF_Rate", y="Directorate", orientation="h",
-                      color="NF_Rate",
-                      color_continuous_scale=[[0, "#E1F5EE"], [0.4, AMBER], [1, CORAL]],
-                      text="NF_Rate", height=480,
-                      labels={"NF_Rate": "Non-Function Rate (%)", "Directorate": ""})
-        fig2.update_coloraxes(showscale=False)
-        fig2.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-        fig2.update_layout(make_layout({"margin": dict(l=0, r=60, t=10, b=30)}))
-        fig2.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("Hospital-level OR Room Detail")
-    sort_opt = st.selectbox("Sort by", [
-        "Functioning ORs", "Non-Functioning", "Emergency ORs", "Non-Func Rate%", "Hospital Name"
-    ])
-
-    or_det = or_h[or_h["NonEm_Func_ORs"] > 0].copy()
-    or_det["NF_Rate"] = (or_det["NonFunc_ORs"] / (or_det["NonEm_Func_ORs"] + or_det["NonFunc_ORs"]) * 100).round(1)
-    or_show = or_det[["Directorate", "Hospital_Name", "Hospital", "NonEm_Func_ORs", "NonFunc_ORs", "Em_ORs", "NF_Rate"]].copy()
-    or_show.columns = ["Directorate", "Hospital Name", "Hospital Code", "Functioning ORs", "Non-Functioning", "Emergency ORs", "Non-Func Rate%"]
-    or_show = or_show.sort_values(sort_opt, ascending=False)
-    st.dataframe(or_show.reset_index(drop=True), use_container_width=True, height=380)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 5  HOSPITAL EXPLORER
-# ══════════════════════════════════════════════════════════════════════════════
-with tab5:
-    st.header("Hospital Explorer")
-
-    ca, cb = st.columns([1, 3])
-    with ca:
-        dir_choice = st.selectbox(
-            "Directorate",
-            sorted(df1["Directorate"].dropna().unique().tolist()),
-            key="hex_dir"
-        )
-
-    with cb:
-        hosp_opts = sorted(
-            df1[df1["Directorate"] == dir_choice]["Hospital_Name"].dropna().unique().tolist()
-        )
-        hosp_choice = st.selectbox("Hospital Name", hosp_opts, key="hex_hosp")
-
-    hdf = df1_raw[
-        (df1_raw["Directorate"] == dir_choice) &
-        (df1_raw["Hospital_Name"] == hosp_choice)
-    ].copy()
-
-    for c in NUM_COLS:
-        hdf[c] = pd.to_numeric(hdf[c], errors="coerce")
-    hav = hdf[hdf["Status"] == "Available"]
-
-    st.markdown("---")
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Total WL", fmt(hav["WL_Total"].sum()))
-    c2.metric("Total Surgeries", fmt(hav["Total_Surg"].sum()))
-    c3.metric("Available Specs", str(len(hav)))
-    c4.metric("On Hold Specs", str((hdf["Status"] == "On Hold").sum()))
-    c5.metric("Functioning ORs", fmt(hdf["NonEm_Func_ORs"].iloc[0] if len(hdf) else None))
-
-    st.markdown("---")
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Waiting List by Specialty")
-        if len(hav) > 0:
-            fig = px.bar(hav.sort_values("WL_Total"), x="WL_Total", y="Specialty",
-                         orientation="h", color="WL_Total",
-                         color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-                         text="WL_Total", height=380,
-                         labels={"WL_Total": "Patients", "Specialty": ""})
-            fig.update_coloraxes(showscale=False)
-            fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-            fig.update_layout(make_layout({"margin": dict(l=0, r=50, t=10, b=30)}))
-            fig.update_xaxes(gridcolor="#f0f0f0")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No available specialties for this hospital.")
-
-    with right:
-        st.subheader("Days to Next Slot by Specialty")
-        wh = hav.dropna(subset=["Days_2nd_Slot"]).sort_values("Days_2nd_Slot", ascending=False)
-        if len(wh) > 0:
-            fig2 = px.bar(wh, x="Days_2nd_Slot", y="Specialty", orientation="h",
-                          color="Days_2nd_Slot",
-                          color_continuous_scale=[[0, "#E1F5EE"], [0.5, AMBER], [1, CORAL]],
-                          text="Days_2nd_Slot", height=380,
-                          labels={"Days_2nd_Slot": "Days", "Specialty": ""})
-            fig2.update_coloraxes(showscale=False)
-            fig2.update_traces(texttemplate="%{text:.0f}d", textposition="outside")
-            fig2.update_layout(make_layout({"margin": dict(l=0, r=50, t=10, b=30)}))
-            fig2.update_xaxes(gridcolor="#f0f0f0")
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("No appointment slot data for this hospital.")
-
-    st.markdown("---")
-    st.subheader("Full Specialty Detail")
-    disp_cols = ["Specialty", "Status", "WL_Total", "WL_New", "WL_Booked36", "WL_Unbooked36",
-                 "Elective_Surg", "OnDay_Surg", "Total_Surg", "OR_Sessions", "Days_2nd_Slot"]
-    disp = hdf[disp_cols].copy()
-    disp.columns = ["Specialty", "Status", "WL Total", "New Patients", "Booked 36d", "Unbooked",
-                    "Elective", "One-Day", "Total Surg", "OR Sessions/wk", "Days to Slot"]
-    disp["Status"] = disp["Status"].fillna("N/A")
-
-    def hl(row):
-        if row["Status"] == "Available":
-            return ["background-color:#E1F5EE"] * len(row)
-        if row["Status"] == "On Hold":
-            return ["background-color:#FAEEDA"] * len(row)
-        return [""] * len(row)
-
-    st.dataframe(disp.reset_index(drop=True).style.apply(hl, axis=1),
-                 use_container_width=True, height=440)
-
-    st.markdown("---")
-    st.subheader("Compare with Directorate Average")
-    if len(hav) > 0:
-        dir_data = df1_raw[
-            (df1_raw["Directorate"] == dir_choice) &
-            (df1_raw["Status"] == "Available")
-        ].copy()
-        for c in NUM_COLS:
-            dir_data[c] = pd.to_numeric(dir_data[c], errors="coerce")
-
-        metric_map = {
-            "Avg WL Patients": "WL_Total",
-            "Avg Total Surgeries": "Total_Surg",
-            "Avg Days to Slot": "Days_2nd_Slot",
-            "Avg OR Sessions/wk": "OR_Sessions",
+def is_or_score_file(filepath: str) -> tuple[bool, dict]:
+    """Return (True, sheet_map) if file has Summary Sheet + at least one KPI sheet."""
+    try:
+        sheets = pd.ExcelFile(filepath).sheet_names
+        if "Summary Sheet" not in sheets:
+            return False, {}
+        kpi_manual = find_kpi_manual_sheet(sheets)
+        if kpi_manual is None:
+            return False, {}
+        kpi_it       = find_kpi_it_sheet(sheets)
+        waiting_time = find_waiting_time_sheet(sheets)
+        return True, {
+            "kpi_manual":   kpi_manual,
+            "kpi_it":       kpi_it,
+            "waiting_time": waiting_time,
         }
-        sel_m = st.selectbox("Metric", list(metric_map.keys()))
-        col_n = metric_map[sel_m]
-        davg = dir_data.groupby("Specialty")[col_n].mean().reset_index()
-        davg.columns = ["Specialty", "Dir_Avg"]
-        hvals = hav[["Specialty", col_n]].copy()
-        hvals.columns = ["Specialty", "Hospital"]
-        comp = davg.merge(hvals, on="Specialty").dropna()
+    except Exception:
+        return False, {}
 
-        if len(comp) > 0:
-            fig3 = go.Figure()
-            fig3.add_trace(go.Bar(x=comp["Specialty"], y=comp["Hospital"],
-                                  name=hosp_choice, marker_color=TEAL))
-            fig3.add_trace(go.Bar(x=comp["Specialty"], y=comp["Dir_Avg"],
-                                  name=f"{dir_choice} avg", marker_color=GRAY, opacity=0.65))
-            fig3.update_layout(make_layout({"barmode": "group", "height": 360,
-                                            "margin": dict(l=0, r=0, t=10, b=70),
-                                            "legend": dict(orientation="h", y=1.05),
-                                            "xaxis_tickangle": -35,
-                                            "yaxis_title": sel_m}))
-            fig3.update_yaxes(gridcolor="#f0f0f0")
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("Not enough shared specialties for comparison.")
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 6  FILE COMPARISON
+# SPECIALTY LEVEL DATA — FILE PROCESSING
 # ══════════════════════════════════════════════════════════════════════════════
-if comparing and tab6 is not None:
-    with tab6:
-        st.header("File Comparison")
-        st.caption(f"**File 1:** {label1}   |   **File 2:** {label2}")
-        st.markdown("*Positive delta = File 1 is higher. Negative = File 2 is higher.*")
 
-        st.subheader("Key Metric Comparison")
-        metrics = {
-            "Total WL Patients": ("WL_Total", avail1, avail2),
-            "Total Surgeries": ("Total_Surg", avail1, avail2),
-            "Elective Surgeries": ("Elective_Surg", avail1, avail2),
-            "One-Day Surgeries": ("OnDay_Surg", avail1, avail2),
-            "Avg Days to Slot": ("Days_2nd_Slot", avail1, avail2),
-            "Hospitals Reporting": (None, avail1, avail2),
-        }
+def read_hospital_code(filepath: str) -> str:
+    df = pd.read_excel(filepath, sheet_name="Summary Sheet", header=None)
+    return str(df.iloc[9, 2]).strip().upper()
 
-        cols = st.columns(3)
-        for idx, (label, (col, a1, a2)) in enumerate(metrics.items()):
-            if col is None:
-                v1 = a1["Hospital_Name"].nunique()
-                v2 = a2["Hospital_Name"].nunique()
-            else:
-                v1 = a1[col].mean() if "Avg" in label else a1[col].sum()
-                v2 = a2[col].mean() if "Avg" in label else a2[col].sum()
-            d = v1 - v2
-            fmt_v = f"{v1:.1f}" if "Avg" in label else fmt(v1)
-            fmt_d = f"{d:+.1f}" if "Avg" in label else f"{d:+,.0f}"
-            cols[idx % 3].metric(label, fmt_v, delta=fmt_d)
 
-        st.markdown("---")
+def read_waiting_time(filepath: str, sheet_name: str) -> pd.DataFrame:
+    df = pd.read_excel(filepath, sheet_name=sheet_name, header=0)
+    return df.iloc[:SPECIALTY_ROWS].copy()
 
-        st.subheader("Waiting List by Specialty")
-        sp1 = avail1.groupby("Specialty")["WL_Total"].sum().reset_index(name="File1")
-        sp2 = avail2.groupby("Specialty")["WL_Total"].sum().reset_index(name="File2")
-        sp = sp1.merge(sp2, on="Specialty", how="outer").fillna(0)
-        sp["Delta"] = sp["File1"] - sp["File2"]
-        sp = sp.sort_values("Delta", ascending=True)
 
-        fig_sp = go.Figure()
-        fig_sp.add_trace(go.Bar(y=sp["Specialty"], x=sp["File1"],
-                                name=label1, orientation="h", marker_color=TEAL))
-        fig_sp.add_trace(go.Bar(y=sp["Specialty"], x=sp["File2"],
-                                name=label2, orientation="h", marker_color=BLUE, opacity=0.7))
-        fig_sp.update_layout(make_layout({"barmode": "group", "height": 440,
-                                          "legend": dict(orientation="h", y=1.05)}))
-        fig_sp.update_xaxes(gridcolor="#f0f0f0", title="Patients")
-        st.plotly_chart(fig_sp, use_container_width=True)
-
-        st.subheader("WL Change by Directorate (File 1 minus File 2)")
-        d1 = avail1.groupby("Directorate")["WL_Total"].sum().reset_index(name="F1")
-        d2 = avail2.groupby("Directorate")["WL_Total"].sum().reset_index(name="F2")
-        dd = d1.merge(d2, on="Directorate", how="outer").fillna(0)
-        dd["Delta"] = dd["F1"] - dd["F2"]
-        dd = dd.sort_values("Delta")
-        colors_d = [TEAL if v >= 0 else CORAL for v in dd["Delta"]]
-        fig_dd = go.Figure(go.Bar(
-            x=dd["Delta"], y=dd["Directorate"], orientation="h",
-            marker_color=colors_d,
-            text=dd["Delta"].apply(lambda v: f"{v:+,.0f}"),
-            textposition="outside",
-        ))
-        fig_dd.update_layout(make_layout({"height": 440, "margin": dict(l=0, r=60, t=10, b=30)}))
-        fig_dd.update_xaxes(gridcolor="#f0f0f0", title="Change in Patients (File 1 − File 2)")
-        fig_dd.add_vline(x=0, line_width=1.5, line_color=GRAY)
-        st.plotly_chart(fig_dd, use_container_width=True)
-
-        st.subheader("Avg Days to 2nd Slot — Specialty Comparison")
-        w1 = avail1.groupby("Specialty")["Days_2nd_Slot"].mean().reset_index(name="F1")
-        w2 = avail2.groupby("Specialty")["Days_2nd_Slot"].mean().reset_index(name="F2")
-        ww = w1.merge(w2, on="Specialty", how="outer")
-        ww["Delta"] = (ww["F1"] - ww["F2"]).round(1)
-        ww = ww.sort_values("Delta")
-        colors_w = [TEAL if v >= 0 else GREEN for v in ww["Delta"].fillna(0)]
-        fig_ww = go.Figure(go.Bar(
-            x=ww["Delta"], y=ww["Specialty"], orientation="h",
-            marker_color=colors_w,
-            text=ww["Delta"].apply(lambda v: f"{v:+.1f}d" if not pd.isna(v) else ""),
-            textposition="outside",
-        ))
-        fig_ww.update_layout(make_layout({"height": 420, "margin": dict(l=0, r=70, t=10, b=30)}))
-        fig_ww.update_xaxes(gridcolor="#f0f0f0", title="Change in Days (File 1 − File 2)")
-        fig_ww.add_vline(x=0, line_width=1.5, line_color=GRAY)
-        st.plotly_chart(fig_ww, use_container_width=True)
-
-        st.subheader("Hospital Coverage Differences")
-        h1_set = set(df1_raw["Hospital_Name"].dropna().unique())
-        h2_set = set(df2_raw["Hospital_Name"].dropna().unique())
-        only1 = sorted(h1_set - h2_set)
-        only2 = sorted(h2_set - h1_set)
-        both = len(h1_set & h2_set)
-        ca2, cb2, cc2 = st.columns(3)
-        ca2.metric("Only in File 1", str(len(only1)))
-        cb2.metric("In Both Files", str(both))
-        cc2.metric("Only in File 2", str(len(only2)))
-        if only1 or only2:
-            exp = st.expander("See which hospitals differ")
-            with exp:
-                if only1:
-                    st.write(f"**Only in {label1}:** " + ", ".join(only1))
-                if only2:
-                    st.write(f"**Only in {label2}:** " + ", ".join(only2))
-
-        st.subheader("Full Directorate × Specialty Comparison Table")
-        grp_cols = ["Directorate", "Specialty"]
-        agg_cols = ["WL_Total", "Total_Surg", "Elective_Surg", "Days_2nd_Slot"]
-        t1 = avail1.groupby(grp_cols)[agg_cols].sum().reset_index()
-        t2 = avail2.groupby(grp_cols)[agg_cols].sum().reset_index()
-        tm = t1.merge(t2, on=grp_cols, suffixes=("_f1", "_f2"), how="outer").fillna(0)
-        for c in agg_cols:
-            tm[f"{c}_delta"] = (tm[f"{c}_f1"] - tm[f"{c}_f2"]).round(1)
-
-        show_cols2 = (
-            grp_cols +
-            [f"{c}_f1" for c in agg_cols] +
-            [f"{c}_f2" for c in agg_cols] +
-            [f"{c}_delta" for c in agg_cols]
-        )
-        tm_show = tm[show_cols2].copy()
-        tm_show.columns = (
-            grp_cols +
-            [f"{c} (F1)" for c in ["WL", "Surgeries", "Elective", "Days"]] +
-            [f"{c} (F2)" for c in ["WL", "Surgeries", "Elective", "Days"]] +
-            [f"Δ {c}" for c in ["WL", "Surgeries", "Elective", "Days"]]
-        )
-        st.dataframe(tm_show.reset_index(drop=True), use_container_width=True, height=400)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 7 — WEEKLY EXECUTIVE
-# ══════════════════════════════════════════════════════════════════════════════
-with tab7:
-    st.header("Weekly Executive Report")
-    st.caption("All KPIs are derived from the uploaded primary file (File 1 — Primary Upload). "
-               "Formulas follow the OR Report Database definitions.")
-
-    df = avail1.copy()
-
-    SPEC_MAP = {
-        "Ophthalmology": ["Ophthalmology", "Ophthlamology", "Opthalmology"],
-        "Orthopedics": ["Orthopedics", "Orthopedics Surgery", "Orthopaedics"],
-        "Pediatrics": ["Pediatrics", "Pediatrics Surgery", "Paediatrics"],
-        "General Surgery": ["General Surgery"],
-        "Bariatric Surgery": ["Bariatric Surgery"],
-        "Plastic Surgery": ["Plastic Surgery"],
-        "ENT Surgery - Otolaryngology": ["ENT Surgery - Otolaryngology", "ENT Surgery", "Otolaryngology"],
-        "Urology": ["Urology"],
-        "Dentistry": ["Dentistry"],
-        "Vascular Surgery": ["Vascular Surgery"],
-        "Obstetrics & Gynecology": ["Obstetrics & Gynecology", "Obstetrics and Gynecology", "OB/GYN"],
-        "Neurosurgery": ["Neurosurgery"],
-        "Oral Surgery": ["Oral Surgery"],
-        "Cardiothoracic Surgery": ["Cardiothoracic Surgery"],
-    }
-
-    def get_spec(df_src, canonical):
-        variants = SPEC_MAP.get(canonical, [canonical])
-        return df_src[df_src["Specialty"].isin(variants)]
-
-    def spec_val(df_src, canonical, col, agg="sum"):
-        sub = get_spec(df_src, canonical)
-        if len(sub) == 0:
-            return np.nan
-        if agg == "sum":
-            return sub[col].sum()
-        elif agg == "mean":
-            return sub[col].mean()
-
-    def weeks(days_val):
-        if pd.isna(days_val) or days_val == 0:
-            return "—"
-        return f"{days_val / 7:.2f}"
-
-    def pct_str(num, denom):
-        if pd.isna(num) or pd.isna(denom) or denom == 0:
-            return "—"
-        return f"{num / denom * 100:.1f}%"
-
-    def pct_val(num, denom):
-        if pd.isna(num) or pd.isna(denom) or denom == 0:
-            return np.nan
-        return num / denom * 100
-
-    st.markdown('<div class="exec-section">1 · Core Elective Surgery KPIs</div>', unsafe_allow_html=True)
-
-    total_elective = df["Elective_Surg"].sum()
-    total_surg = df["Total_Surg"].sum()
-    total_new = df["WL_New"].sum()
-
-    top_specs_df = (
-        df.groupby("Specialty")["Elective_Surg"]
-        .sum()
-        .sort_values(ascending=False)
-        .reset_index()
-    )
-    top1 = top_specs_df.iloc[0]["Specialty"] if len(top_specs_df) > 0 else "—"
-    top2 = top_specs_df.iloc[1]["Specialty"] if len(top_specs_df) > 1 else "—"
-    top3 = top_specs_df.iloc[2]["Specialty"] if len(top_specs_df) > 2 else "—"
-    top1_v = top_specs_df.iloc[0]["Elective_Surg"] if len(top_specs_df) > 0 else 0
-    top2_v = top_specs_df.iloc[1]["Elective_Surg"] if len(top_specs_df) > 1 else 0
-    top3_v = top_specs_df.iloc[2]["Elective_Surg"] if len(top_specs_df) > 2 else 0
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("# Elective Surgeries (Total)", fmt(total_elective))
-    c2.metric("Highest Specialty", f"{top1}", help=f"{fmt(top1_v)} elective surgeries")
-    c3.metric("2nd Highest Specialty", f"{top2}", help=f"{fmt(top2_v)} elective surgeries")
-    c4.metric("3rd Highest Specialty", f"{top3}", help=f"{fmt(top3_v)} elective surgeries")
-
-    fig_top = px.bar(
-        top_specs_df.head(10).sort_values("Elective_Surg"),
-        x="Elective_Surg", y="Specialty", orientation="h",
-        color="Elective_Surg",
-        color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-        text="Elective_Surg", height=340,
-        labels={"Elective_Surg": "Elective Surgeries", "Specialty": ""},
-        title="Top 10 Specialties — Elective Surgeries"
-    )
-    fig_top.update_coloraxes(showscale=False)
-    fig_top.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-    fig_top.update_layout(make_layout({"margin": dict(l=0, r=60, t=30, b=10)}))
-    fig_top.update_xaxes(gridcolor="#f0f0f0")
-    st.plotly_chart(fig_top, use_container_width=True)
-
-    st.markdown('<div class="exec-section-amber">2 · Overall Waiting Time & Volume KPIs</div>', unsafe_allow_html=True)
-
-    avg_days_overall = df["Days_2nd_Slot"].mean()
-    avg_weeks_overall = avg_days_overall / 7 if not pd.isna(avg_days_overall) else np.nan
-
-    vol_gt36 = df["WL_Unbooked36"].sum()
-    vol_lt36 = df["WL_Booked36"].sum()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Average Waiting Time (Weeks)",
-              f"{avg_weeks_overall:.2f}" if not pd.isna(avg_weeks_overall) else "—")
-    c2.metric("Volume of New Patients Added to List", fmt(total_new))
-    c3.metric("Patients Waiting > 36 Days", fmt(vol_gt36))
-    c4.metric("Patients Waiting < 36 Days", fmt(vol_lt36))
-
-    st.markdown('<div class="exec-section-blue">3 · Primary Specialties — Ophthalmology · Orthopedics · Pediatrics</div>', unsafe_allow_html=True)
-
-    PRIMARY_SPECS = ["Ophthalmology", "Orthopedics", "Pediatrics"]
-
-    st.markdown("**Average Waiting Time (Weeks)**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        d = spec_val(df, spec, "Days_2nd_Slot", "mean")
-        col_widget.metric(f"Avg Weeks — {spec}", weeks(d))
-
-    st.markdown("**Volume of Patients on Waiting List**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        v = spec_val(df, spec, "WL_Total", "sum")
-        col_widget.metric(f"WL Volume — {spec}", fmt(v))
-
-    st.markdown("**Volume of New Patients on Waiting List**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        v = spec_val(df, spec, "WL_New", "sum")
-        col_widget.metric(f"New Patients — {spec}", fmt(v))
-
-    st.markdown("**# Elective Surgeries**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        v = spec_val(df, spec, "Elective_Surg", "sum")
-        col_widget.metric(f"Elective — {spec}", fmt(v))
-
-    st.markdown("**% Performed Surgeries vs New Patients**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        el = spec_val(df, spec, "Elective_Surg", "sum")
-        nw = spec_val(df, spec, "WL_New", "sum")
-        col_widget.metric(f"% Surg vs New — {spec}", pct_str(el, nw))
-
-    st.markdown("**Percentage of Surgeries Performed**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        ts = spec_val(df, spec, "Total_Surg", "sum")
-        nw = spec_val(df, spec, "WL_New", "sum")
-        col_widget.metric(f"% Performed — {spec}", pct_str(ts, nw))
-
-    st.markdown("**Number of Referrals**")
-    c1, c2, c3 = st.columns(3)
-    for col_widget, spec in zip([c1, c2, c3], PRIMARY_SPECS):
-        col_widget.markdown(
-            f'<div class="placeholder-box">Referrals — {spec}<br>'
-            f'<strong>⚠ Not available in current dataset</strong></div>',
-            unsafe_allow_html=True
-        )
-
-    st.markdown('<div class="exec-section">4 · Extended Specialties — Waiting Time (Weeks)</div>', unsafe_allow_html=True)
-
-    EXTENDED_SPECS = [
-        "General Surgery", "Bariatric Surgery", "Plastic Surgery",
-        "ENT Surgery - Otolaryngology", "Urology", "Dentistry",
-        "Vascular Surgery", "Obstetrics & Gynecology", "Neurosurgery",
-        "Oral Surgery", "Cardiothoracic Surgery",
-    ]
-
-    wait_rows = []
-    for spec in EXTENDED_SPECS:
-        d = spec_val(df, spec, "Days_2nd_Slot", "mean")
-        wait_rows.append({"Specialty": spec, "Avg Weeks": round(d / 7, 2) if not pd.isna(d) else None})
-    wait_df = pd.DataFrame(wait_rows).dropna(subset=["Avg Weeks"])
-
-    if len(wait_df) > 0:
-        fig_wait = px.bar(
-            wait_df.sort_values("Avg Weeks"),
-            x="Avg Weeks", y="Specialty", orientation="h",
-            color="Avg Weeks",
-            color_continuous_scale=[[0, "#E1F5EE"], [0.5, AMBER], [1, CORAL]],
-            text="Avg Weeks", height=380,
-            labels={"Avg Weeks": "Avg Waiting (Weeks)", "Specialty": ""},
-        )
-        fig_wait.update_coloraxes(showscale=False)
-        fig_wait.update_traces(texttemplate="%{text:.2f} wks", textposition="outside")
-        fig_wait.update_layout(make_layout({"margin": dict(l=0, r=80, t=10, b=10)}))
-        fig_wait.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig_wait, use_container_width=True)
-    else:
-        st.info("No waiting time data available for extended specialties.")
-
-    st.markdown('<div class="exec-section">4b · Extended Specialties — Volume of New Patients on Waiting List</div>', unsafe_allow_html=True)
-
-    new_rows = []
-    for spec in EXTENDED_SPECS:
-        v = spec_val(df, spec, "WL_New", "sum")
-        new_rows.append({"Specialty": spec, "New Patients": int(v) if not pd.isna(v) else 0})
-    new_df = pd.DataFrame(new_rows)
-
-    cols_ext = st.columns(4)
-    for i, row in new_df.iterrows():
-        cols_ext[i % 4].metric(f"New — {row['Specialty']}", fmt(row["New Patients"]))
-
-    st.markdown('<div class="exec-section">4c · Extended Specialties — # Elective Surgeries</div>', unsafe_allow_html=True)
-
-    el_rows = []
-    for spec in EXTENDED_SPECS:
-        v = spec_val(df, spec, "Elective_Surg", "sum")
-        el_rows.append({"Specialty": spec, "Elective": int(v) if not pd.isna(v) else 0})
-    el_df = pd.DataFrame(el_rows)
-
-    fig_el = px.bar(
-        el_df.sort_values("Elective"),
-        x="Elective", y="Specialty", orientation="h",
-        color="Elective",
-        color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-        text="Elective", height=380,
-        labels={"Elective": "Elective Surgeries", "Specialty": ""},
-    )
-    fig_el.update_coloraxes(showscale=False)
-    fig_el.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-    fig_el.update_layout(make_layout({"margin": dict(l=0, r=60, t=10, b=10)}))
-    fig_el.update_xaxes(gridcolor="#f0f0f0")
-    st.plotly_chart(fig_el, use_container_width=True)
-
-    st.markdown('<div class="exec-section-amber">4d · Extended Specialties — Number of Referrals</div>', unsafe_allow_html=True)
-    st.markdown(
-        '<div class="placeholder-box">Referral data for all extended specialties '
-        '(General Surgery, Bariatric Surgery, Plastic Surgery, ENT, Urology, Dentistry, '
-        'Vascular Surgery, OB/GYN, Neurosurgery, Oral Surgery, Cardiothoracic Surgery) — '
-        '<strong>⚠ Not available in current dataset</strong>. '
-        'This field requires a separate referrals data source.</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="exec-section-blue">5 · Percentage of Surgeries Performed (Total Surg ÷ New Patients × 100)</div>', unsafe_allow_html=True)
-
-    ALL_SPECS_PERF = PRIMARY_SPECS + EXTENDED_SPECS
-    perf_rows = []
-    for spec in ALL_SPECS_PERF:
-        ts = spec_val(df, spec, "Total_Surg", "sum")
-        nw = spec_val(df, spec, "WL_New", "sum")
-        pv = pct_val(ts, nw)
-        perf_rows.append({
-            "Specialty": spec,
-            "Total Surg": ts if not pd.isna(ts) else 0,
-            "New Patients": nw if not pd.isna(nw) else 0,
-            "% Performed": round(pv, 1) if not pd.isna(pv) else None,
-        })
-    perf_df = pd.DataFrame(perf_rows).dropna(subset=["% Performed"])
-
-    if len(perf_df) > 0:
-        fig_perf = px.bar(
-            perf_df.sort_values("% Performed"),
-            x="% Performed", y="Specialty", orientation="h",
-            color="% Performed",
-            color_continuous_scale=[[0, CORAL], [0.5, AMBER], [1, TEAL]],
-            text="% Performed", height=480,
-            labels={"% Performed": "% Surgeries Performed", "Specialty": ""},
-        )
-        fig_perf.update_coloraxes(showscale=False)
-        fig_perf.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-        fig_perf.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-        fig_perf.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig_perf, use_container_width=True)
-
-    total_ts_all = df["Total_Surg"].sum()
-    total_nw_all = df["WL_New"].sum()
-    kingdom_pct = pct_val(total_ts_all, total_nw_all)
-    st.metric(
-        "Overall Kingdom Percentage (Total Surgeries ÷ Total New Patients × 100)",
-        f"{kingdom_pct:.1f}%" if not pd.isna(kingdom_pct) else "—"
-    )
-
-    st.markdown('<div class="exec-section-amber">6 · Day Surgery & Surgical Cancellation</div>', unsafe_allow_html=True)
-
-    total_oneday = df["OnDay_Surg"].sum()
-    day_surg_pct = pct_val(total_oneday, total_surg)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Day (One-Day) Surgeries", fmt(total_oneday))
-    c2.metric("% Total Day Surgery (OnDay ÷ Total Surg × 100)",
-              f"{day_surg_pct:.1f}%" if not pd.isna(day_surg_pct) else "—")
-    c3.markdown(
-        '<div class="placeholder-box">% Surgical Cancellation<br>'
-        '<strong>⚠ Not available in current dataset</strong><br>'
-        'Requires cancelled-case records not present in the specialty-level file.</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="exec-section-coral">7 · Non-Scheduled Surgeries & Total Referrals</div>', unsafe_allow_html=True)
-
-    total_nonsched = df["WL_NonSched"].sum()
-
-    c1, c2 = st.columns(2)
-    c1.metric("Non-Scheduled Surgeries (WL_NonSched)", fmt(total_nonsched))
-    c2.markdown(
-        '<div class="placeholder-box">Total Referrals<br>'
-        '<strong>⚠ Not available in current dataset</strong><br>'
-        'Referral counts are not captured in the specialty-level aggregated file.</div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown('<div class="exec-section">8 · Full KPI Summary Table — All Specialties</div>', unsafe_allow_html=True)
-
-    summary_rows = []
-    for spec in ALL_SPECS_PERF:
-        d_days = spec_val(df, spec, "Days_2nd_Slot", "mean")
-        wl_tot = spec_val(df, spec, "WL_Total", "sum")
-        wl_new = spec_val(df, spec, "WL_New", "sum")
-        el_surg = spec_val(df, spec, "Elective_Surg", "sum")
-        tot_sg = spec_val(df, spec, "Total_Surg", "sum")
-        pv = pct_val(tot_sg, wl_new)
-        summary_rows.append({
-            "Specialty": spec,
-            "Avg Wait (Weeks)": round(d_days / 7, 2) if not pd.isna(d_days) else None,
-            "WL Volume": int(wl_tot) if not pd.isna(wl_tot) else 0,
-            "New Patients": int(wl_new) if not pd.isna(wl_new) else 0,
-            "Elective Surgeries": int(el_surg) if not pd.isna(el_surg) else 0,
-            "Total Surgeries": int(tot_sg) if not pd.isna(tot_sg) else 0,
-            "% Surg Performed": f"{pv:.1f}%" if not pd.isna(pv) else "—",
-            "Referrals": "N/A (not in dataset)",
-        })
-
-    summary_df = pd.DataFrame(summary_rows)
-
-    def style_pct(val):
-        try:
-            v = float(str(val).replace("%", ""))
-            if v >= 100:
-                return "background-color:#d4edda; color:#155724"
-            if v >= 50:
-                return "background-color:#fff3cd; color:#856404"
-            return "background-color:#f8d7da; color:#721c24"
-        except Exception:
-            return ""
+def process_spec_file(
+    filepath: str, key_map: dict, unknown_codes: set, name_map: dict = None
+) -> list[dict]:
+    """Process one OR data collector file → list of specialty-level row dicts."""
+    rows = []
+    fname = os.path.basename(filepath)
 
     try:
-        styled = summary_df.style.map(style_pct, subset=["% Surg Performed"])
-    except AttributeError:
-        styled = summary_df.style.applymap(style_pct, subset=["% Surg Performed"])
-    st.dataframe(styled, use_container_width=True, height=480)
+        ok, wt_sheet = is_or_data_file(filepath)
+        if not ok:
+            logging.warning(f"SKIPPED (no required sheets): {fname}")
+            return []
 
-    st.markdown("---")
-    st.caption(
-        "**Formula reference:** "
-        "Avg Wait (Weeks) = Days_2nd_Slot ÷ 7 · "
-        "% Surg Performed = Total_Surg ÷ WL_New × 100 · "
-        "% Day Surgery = OnDay_Surg ÷ Total_Surg × 100 · "
-        "Overall Kingdom % = Σ Total_Surg ÷ Σ WL_New × 100. "
-        "Referrals, Surgical Cancellation, and Non-scheduled surgery details "
-        "require additional data sources not present in the specialty-level aggregated file."
-    )
+        hospital_code = read_hospital_code(filepath)
+        wt_df         = read_waiting_time(filepath, wt_sheet)
+        directorate   = key_map.get(hospital_code, "")
+        hospital_name = (name_map or {}).get(hospital_code, "")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 8 — WEEKLY-SPECIALTY
-# ══════════════════════════════════════════════════════════════════════════════
-with tab8:
-    st.header("Weekly Specialty Report")
-    st.caption(
-        "Shows 4 KPIs per specialty: # Patients on Waiting List · # Elective Surgeries · "
-        "# Referrals · # New Patients. Data from File 1 — Primary Upload."
-    )
-
-    df_ws = avail1.copy()
-
-    WS_SPECS = [
-        "Bariatric Surgery",
-        "Cardiothoracic Surgery",
-        "Dentistry",
-        "ENT Surgery - Otolaryngology",
-        "General Surgery",
-        "Neurosurgery",
-        "Obstetrics & Gynecology",
-        "Ophthalmology",
-        "Oral Surgery",
-        "Orthopedics",
-        "Pediatrics",
-        "Plastic Surgery",
-        "Urology",
-        "Vascular Surgery",
-    ]
-
-    WS_SPEC_MAP = {
-        "Ophthalmology": ["Ophthalmology", "Ophthlamology", "Opthalmology"],
-        "Orthopedics": ["Orthopedics", "Orthopedics Surgery", "Orthopaedics"],
-        "Pediatrics": ["Pediatrics", "Pediatrics Surgery", "Paediatrics"],
-        "General Surgery": ["General Surgery"],
-        "Bariatric Surgery": ["Bariatric Surgery"],
-        "Plastic Surgery": ["Plastic Surgery"],
-        "ENT Surgery - Otolaryngology": ["ENT Surgery - Otolaryngology", "ENT Surgery", "Otolaryngology"],
-        "Urology": ["Urology"],
-        "Dentistry": ["Dentistry"],
-        "Vascular Surgery": ["Vascular Surgery"],
-        "Obstetrics & Gynecology": ["Obstetrics & Gynecology", "Obstetrics and Gynecology", "OB/GYN"],
-        "Neurosurgery": ["Neurosurgery"],
-        "Oral Surgery": ["Oral Surgery"],
-        "Cardiothoracic Surgery": ["Cardiothoracic Surgery"],
-    }
-
-    def ws_get(df_src, canonical):
-        variants = WS_SPEC_MAP.get(canonical, [canonical])
-        return df_src[df_src["Specialty"].isin(variants)]
-
-    def ws_sum(df_src, canonical, col):
-        sub = ws_get(df_src, canonical)
-        return sub[col].sum() if len(sub) > 0 else 0
-
-    rows = []
-    for spec in WS_SPECS:
-        rows.append({
-            "Specialty": spec,
-            "# Patients (WL)": ws_sum(df_ws, spec, "WL_Total"),
-            "# Elective Surg": ws_sum(df_ws, spec, "Elective_Surg"),
-            "# New Patients": ws_sum(df_ws, spec, "WL_New"),
-        })
-    ws_df = pd.DataFrame(rows)
-
-    st.markdown('<div class="exec-section">Summary — All Specialties</div>', unsafe_allow_html=True)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total # Patients (WL)", f"{int(ws_df['# Patients (WL)'].sum()):,}")
-    c2.metric("Total # Elective Surg", f"{int(ws_df['# Elective Surg'].sum()):,}")
-    c3.metric("Total # New Patients", f"{int(ws_df['# New Patients'].sum()):,}")
-    c4.markdown(
-        '<div class="placeholder-box" style="margin-top:6px;">'
-        'Total # Referrals<br><strong>⚠ Not in dataset</strong></div>',
-        unsafe_allow_html=True
-    )
-
-    st.markdown("---")
-
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("# Patients on Waiting List")
-        fig_wl = px.bar(
-            ws_df.sort_values("# Patients (WL)"),
-            x="# Patients (WL)", y="Specialty", orientation="h",
-            color="# Patients (WL)",
-            color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-            text="# Patients (WL)", height=460,
-            labels={"# Patients (WL)": "Patients", "Specialty": ""},
-        )
-        fig_wl.update_coloraxes(showscale=False)
-        fig_wl.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-        fig_wl.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-        fig_wl.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig_wl, use_container_width=True)
-
-    with right:
-        st.subheader("# Elective Surgeries")
-        fig_el = px.bar(
-            ws_df.sort_values("# Elective Surg"),
-            x="# Elective Surg", y="Specialty", orientation="h",
-            color="# Elective Surg",
-            color_continuous_scale=[[0, "#E1F5EE"], [1, BLUE]],
-            text="# Elective Surg", height=460,
-            labels={"# Elective Surg": "Surgeries", "Specialty": ""},
-        )
-        fig_el.update_coloraxes(showscale=False)
-        fig_el.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-        fig_el.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-        fig_el.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig_el, use_container_width=True)
-
-    left2, right2 = st.columns(2)
-
-    with left2:
-        st.subheader("# New Patients Added to Waiting List")
-        fig_np = px.bar(
-            ws_df.sort_values("# New Patients"),
-            x="# New Patients", y="Specialty", orientation="h",
-            color="# New Patients",
-            color_continuous_scale=[[0, "#E1F5EE"], [1, AMBER]],
-            text="# New Patients", height=460,
-            labels={"# New Patients": "New Patients", "Specialty": ""},
-        )
-        fig_np.update_coloraxes(showscale=False)
-        fig_np.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-        fig_np.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-        fig_np.update_xaxes(gridcolor="#f0f0f0")
-        st.plotly_chart(fig_np, use_container_width=True)
-
-    with right2:
-        st.subheader("# Referrals")
-        st.markdown(
-            '<div class="placeholder-box" style="margin-top:60px; padding:30px 20px; text-align:center;">'
-            '<span style="font-size:1.1rem;">⚠ Referral data is <strong>not available</strong> '
-            'in the current specialty-level dataset.<br><br>'
-            'This KPI requires a separate referrals data source to be uploaded.</span>'
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-    st.markdown("---")
-    st.markdown('<div class="exec-section">Per-Specialty Detail Cards</div>', unsafe_allow_html=True)
-
-    for i in range(0, len(WS_SPECS), 2):
-        cols = st.columns(2)
-        for j, spec in enumerate(WS_SPECS[i:i+2]):
-            with cols[j]:
-                patients = ws_sum(df_ws, spec, "WL_Total")
-                elective = ws_sum(df_ws, spec, "Elective_Surg")
-                new_pts = ws_sum(df_ws, spec, "WL_New")
-
-                st.markdown(
-                    f"""
-                    <div style="
-                        border:1px solid rgba(29,158,117,0.3);
-                        border-radius:10px;
-                        padding:14px 18px;
-                        margin-bottom:12px;
-                        background:rgba(29,158,117,0.04);
-                    ">
-                      <div style="font-weight:700;font-size:1rem;margin-bottom:10px;
-                                  color:#1D9E75;border-bottom:1px solid rgba(29,158,117,0.2);
-                                  padding-bottom:6px;">{spec}</div>
-                      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-                        <div>
-                          <div style="font-size:0.72rem;color:#6b7280;"># Patients (WL)</div>
-                          <div style="font-size:1.4rem;font-weight:700;">{int(patients):,}</div>
-                        </div>
-                        <div>
-                          <div style="font-size:0.72rem;color:#6b7280;"># Elective Surgeries</div>
-                          <div style="font-size:1.4rem;font-weight:700;">{int(elective):,}</div>
-                        </div>
-                        <div>
-                          <div style="font-size:0.72rem;color:#6b7280;"># New Patients</div>
-                          <div style="font-size:1.4rem;font-weight:700;">{int(new_pts):,}</div>
-                        </div>
-                        <div>
-                          <div style="font-size:0.72rem;color:#b07a00;"># Referrals</div>
-                          <div style="font-size:1rem;font-weight:600;color:#b07a00;">N/A</div>
-                        </div>
-                      </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    st.markdown("---")
-    st.markdown('<div class="exec-section">Full Specialty Table</div>', unsafe_allow_html=True)
-    ws_display = ws_df.copy()
-    ws_display["# Referrals"] = "N/A (not in dataset)"
-    ws_display = ws_display[["Specialty", "# Patients (WL)", "# Elective Surg", "# New Patients", "# Referrals"]]
-    ws_display.columns = ["Specialty", "# Patients (WL)", "# Elective Surgeries", "# New Patients", "# Referrals"]
-    st.dataframe(ws_display.reset_index(drop=True), use_container_width=True, height=520)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 9 — HIGH LEVEL TABLE
-# ══════════════════════════════════════════════════════════════════════════════
-with tab9:
-    st.header("High Level Table")
-    st.caption(
-        "For each specialty: Sum of Total WL Patients and % Surgeries Performed this week, "
-        "broken down by Directorate / Cluster. "
-        "Formula: % Surgeries Performed = Total_Surg ÷ WL_New × 100."
-    )
-
-    df_hl = avail1.copy()
-
-    HL_SPECS_ORDERED = [
-        "Bariatric Surgery",
-        "Cardiothoracic Surgery",
-        "Dentistry",
-        "ENT Surgery - Otolaryngology",
-        "General Surgery",
-        "Neurosurgery",
-        "Obstetrics & Gynecology",
-        "Ophthalmology",
-        "Oral Surgery",
-        "Orthopedics",
-        "Pediatrics",
-        "Plastic Surgery",
-        "Urology",
-        "Vascular Surgery",
-    ]
-
-    HL_SPEC_MAP = {
-        "Ophthalmology": ["Ophthalmology", "Ophthlamology", "Opthalmology"],
-        "Orthopedics": ["Orthopedics", "Orthopedics Surgery", "Orthopaedics"],
-        "Pediatrics": ["Pediatrics", "Pediatrics Surgery", "Paediatrics"],
-        "General Surgery": ["General Surgery"],
-        "Bariatric Surgery": ["Bariatric Surgery"],
-        "Plastic Surgery": ["Plastic Surgery"],
-        "ENT Surgery - Otolaryngology": ["ENT Surgery - Otolaryngology", "ENT Surgery", "Otolaryngology"],
-        "Urology": ["Urology"],
-        "Dentistry": ["Dentistry"],
-        "Vascular Surgery": ["Vascular Surgery"],
-        "Obstetrics & Gynecology": ["Obstetrics & Gynecology", "Obstetrics and Gynecology", "OB/GYN"],
-        "Neurosurgery": ["Neurosurgery"],
-        "Oral Surgery": ["Oral Surgery"],
-        "Cardiothoracic Surgery": ["Cardiothoracic Surgery"],
-    }
-
-    reverse_map = {}
-    for canonical, variants in HL_SPEC_MAP.items():
-        for v in variants:
-            reverse_map[v] = canonical
-
-    df_hl["Specialty_Canon"] = df_hl["Specialty"].map(reverse_map).fillna(df_hl["Specialty"])
-
-    agg_hl = (
-        df_hl.groupby(["Directorate", "Specialty_Canon"])
-        .agg(WL_Total=("WL_Total", "sum"), Total_Surg=("Total_Surg", "sum"), WL_New=("WL_New", "sum"))
-        .reset_index()
-    )
-    agg_hl["Pct_Perf"] = (agg_hl["Total_Surg"] / agg_hl["WL_New"] * 100).round(1)
-
-    directorates = sorted(df_hl["Directorate"].dropna().unique().tolist())
-
-    pivot_rows = []
-    for d in directorates:
-        row = {"Directorate": d}
-        d_data = agg_hl[agg_hl["Directorate"] == d]
-        for spec in HL_SPECS_ORDERED:
-            spec_row = d_data[d_data["Specialty_Canon"] == spec]
-            if len(spec_row) > 0:
-                row[f"{spec} — WL"] = int(spec_row["WL_Total"].iloc[0])
-                pct = spec_row["Pct_Perf"].iloc[0]
-                row[f"{spec} — %"] = f"{pct:.1f}%" if not pd.isna(pct) else "—"
-            else:
-                row[f"{spec} — WL"] = 0
-                row[f"{spec} — %"] = "—"
-        pivot_rows.append(row)
-
-    total_row = {"Directorate": "GRAND TOTAL"}
-    for spec in HL_SPECS_ORDERED:
-        spec_data = agg_hl[agg_hl["Specialty_Canon"] == spec]
-        total_wl = int(spec_data["WL_Total"].sum())
-        total_surg = spec_data["Total_Surg"].sum()
-        total_new = spec_data["WL_New"].sum()
-        total_pct = (total_surg / total_new * 100) if total_new > 0 else np.nan
-        total_row[f"{spec} — WL"] = total_wl
-        total_row[f"{spec} — %"] = f"{total_pct:.1f}%" if not pd.isna(total_pct) else "—"
-    pivot_rows.append(total_row)
-
-    pivot_df = pd.DataFrame(pivot_rows)
-
-    st.markdown('<div class="exec-section">Kingdom-Level Summary</div>', unsafe_allow_html=True)
-
-    total_wl_all = df_hl["WL_Total"].sum()
-    total_surg_all = df_hl["Total_Surg"].sum()
-    total_new_all = df_hl["WL_New"].sum()
-    kingdom_pct_hl = (total_surg_all / total_new_all * 100) if total_new_all > 0 else np.nan
-    num_dirs = len(directorates)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total WL Patients (Kingdom)", f"{int(total_wl_all):,}")
-    c2.metric("Total Surgeries (Kingdom)", f"{int(total_surg_all):,}")
-    c3.metric("Overall Kingdom % Performed", f"{kingdom_pct_hl:.1f}%" if not pd.isna(kingdom_pct_hl) else "—")
-    c4.metric("Directorates Reporting", str(num_dirs))
-
-    st.markdown("---")
-    st.markdown('<div class="exec-section-blue">Specialty Deep-Dive (WL + % Performed by Directorate)</div>', unsafe_allow_html=True)
-
-    sel_spec_hl = st.selectbox(
-        "Select specialty to visualise",
-        HL_SPECS_ORDERED,
-        key="hl_spec_sel"
-    )
-
-    spec_view = agg_hl[agg_hl["Specialty_Canon"] == sel_spec_hl].copy()
-    spec_view = spec_view.sort_values("WL_Total", ascending=False)
-
-    if len(spec_view) > 0:
-        col_l, col_r = st.columns(2)
-
-        with col_l:
-            st.subheader(f"WL Volume — {sel_spec_hl}")
-            fig_sv_wl = px.bar(
-                spec_view.sort_values("WL_Total"),
-                x="WL_Total", y="Directorate", orientation="h",
-                color="WL_Total",
-                color_continuous_scale=[[0, "#E1F5EE"], [1, TEAL]],
-                text="WL_Total", height=400,
-                labels={"WL_Total": "WL Patients", "Directorate": ""},
+        if not directorate:
+            unknown_codes.add(hospital_code)
+            logging.warning(
+                f"Unknown hospital code '{hospital_code}' in {fname} — Directorate blank"
             )
-            fig_sv_wl.update_coloraxes(showscale=False)
-            fig_sv_wl.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
-            fig_sv_wl.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-            fig_sv_wl.update_xaxes(gridcolor="#f0f0f0")
-            st.plotly_chart(fig_sv_wl, use_container_width=True)
 
-        with col_r:
-            st.subheader(f"% Surgeries Performed — {sel_spec_hl}")
-            spec_pct_view = spec_view.dropna(subset=["Pct_Perf"]).sort_values("Pct_Perf")
-            if len(spec_pct_view) > 0:
-                fig_sv_pct = px.bar(
-                    spec_pct_view,
-                    x="Pct_Perf", y="Directorate", orientation="h",
-                    color="Pct_Perf",
-                    color_continuous_scale=[[0, CORAL], [0.5, AMBER], [1, TEAL]],
-                    text="Pct_Perf", height=400,
-                    labels={"Pct_Perf": "% Performed", "Directorate": ""},
+        # Snapshot Thursday: try sheet col 12 first, fall back to Summary Sheet
+        snapshot_thursday = None
+        for val in wt_df.iloc[:, 12]:
+            if pd.notna(val):
+                snapshot_thursday = val
+                break
+
+        if snapshot_thursday is None:
+            snapshot_thursday = fallback_date_from_summary(filepath)
+            if snapshot_thursday:
+                logging.info(
+                    f"Date fallback used for {hospital_code}: "
+                    f"{snapshot_thursday.date() if hasattr(snapshot_thursday, 'date') else snapshot_thursday}"
                 )
-                fig_sv_pct.update_coloraxes(showscale=False)
-                fig_sv_pct.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
-                fig_sv_pct.update_layout(make_layout({"margin": dict(l=0, r=70, t=10, b=10)}))
-                fig_sv_pct.update_xaxes(gridcolor="#f0f0f0")
-                st.plotly_chart(fig_sv_pct, use_container_width=True)
             else:
-                st.info("No % data available for this specialty.")
-    else:
-        st.info(f"No data found for {sel_spec_hl} in the current file.")
+                logging.warning(f"Could not derive date for {hospital_code} in {fname}")
 
-    st.markdown("---")
-    st.markdown('<div class="exec-section">Full High Level Table — All Specialties × All Directorates</div>', unsafe_allow_html=True)
-    st.caption(
-        "Each specialty has two columns: **WL** = Sum of Total WL Patients · "
-        "**%** = % Surgeries Performed (Total_Surg ÷ WL_New × 100). "
-        "Scroll horizontally to view all 14 specialties."
+        # Date column = Thursday + 3 days (Sunday), filled for ALL rows
+        if snapshot_thursday is not None:
+            try:
+                week_sunday = pd.Timestamp(snapshot_thursday) + timedelta(days=3)
+            except Exception:
+                week_sunday = None
+        else:
+            week_sunday = None
+
+        for i in range(SPECIALTY_ROWS):
+            row       = wt_df.iloc[i]
+            specialty = row.iloc[0]
+
+            if pd.isna(specialty) or str(specialty).strip() in ("", "x"):
+                continue
+
+            specialty_available = row.iloc[1]
+            row_has_data = pd.notna(specialty_available)
+
+            row_thursday = row.iloc[12] if pd.notna(row.iloc[12]) else (
+                snapshot_thursday if row_has_data else None
+            )
+
+            if row_has_data and row_thursday is not None:
+                try:
+                    row_sunday = pd.Timestamp(row_thursday) + timedelta(days=3)
+                except Exception:
+                    row_sunday = week_sunday
+            else:
+                row_sunday = week_sunday
+
+            raw_calc = row.iloc[14]
+            try:
+                calc_days = int(round(float(raw_calc))) if pd.notna(raw_calc) else None
+            except Exception:
+                calc_days = None
+
+            # Keep null as null for "without booked 36d"
+            raw_wob = row.iloc[6]
+            wob_val = raw_wob if pd.notna(raw_wob) else None
+
+            rows.append({
+                "Directorate":       directorate,
+                "Hospital Code":     hospital_code,
+                "Hospital Name":     hospital_name,
+                "Date":              row_sunday,
+                "Specialty":         specialty,
+                SPEC_OUTPUT_COLS[5]:  specialty_available,
+                SPEC_OUTPUT_COLS[6]:  row.iloc[2],
+                SPEC_OUTPUT_COLS[7]:  row.iloc[3],
+                SPEC_OUTPUT_COLS[8]:  row.iloc[4],
+                SPEC_OUTPUT_COLS[9]:  row.iloc[5],
+                SPEC_OUTPUT_COLS[10]: wob_val,
+                SPEC_OUTPUT_COLS[11]: row.iloc[7],
+                SPEC_OUTPUT_COLS[12]: row.iloc[8],
+                SPEC_OUTPUT_COLS[13]: row.iloc[9],
+                SPEC_OUTPUT_COLS[14]: row.iloc[10],
+                SPEC_OUTPUT_COLS[15]: row.iloc[11],
+                SPEC_OUTPUT_COLS[16]: row_thursday,
+                SPEC_OUTPUT_COLS[17]: row.iloc[13],
+                SPEC_OUTPUT_COLS[18]: calc_days,
+                SPEC_OUTPUT_COLS[19]: row.iloc[15] if len(row) > 15 else None,
+                SPEC_OUTPUT_COLS[20]: row.iloc[16] if len(row) > 16 else None,
+                SPEC_OUTPUT_COLS[21]: row.iloc[17] if len(row) > 17 else None,
+                SPEC_OUTPUT_COLS[22]: row.iloc[18] if len(row) > 18 else None,
+            })
+
+        label = directorate if directorate else "NO DIRECTORATE"
+        msg = f"  OK  {fname}: {hospital_code} ({label}) — {len(rows)} specialty rows"
+        if wt_sheet != "OR Waiting Time":
+            msg += f" [sheet alias: '{wt_sheet}']"
+        logging.info(msg)
+        print(msg)
+
+    except Exception as e:
+        msg = f"  ERR {fname}: {e}"
+        logging.error(msg)
+        print(msg)
+
+    return rows
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCORE — FILE PROCESSING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def process_score_file(filepath: str, key_map: dict, unknown_codes: set) -> dict | None:
+    """Process one OR data collector file → single score row dict or None."""
+    fname = os.path.basename(filepath)
+
+    try:
+        ok, sheet_map = is_or_score_file(filepath)
+        if not ok:
+            logging.warning(f"SKIPPED (no KPI sheets): {fname}")
+            return None
+
+        kpi_manual_name   = sheet_map["kpi_manual"]
+        kpi_it_name       = sheet_map["kpi_it"]
+        waiting_time_name = sheet_map["waiting_time"]
+
+        wb = openpyxl.load_workbook(
+            filepath, read_only=True, data_only=True, keep_vba=False
+        )
+
+        # ── Summary Sheet ──────────────────────────────────────────────────────
+        ss = wb["Summary Sheet"]
+        hosp_code  = _safe_str(_cell(ss, 10, 3))
+        hosp_name  = _safe_str(_cell(ss, 11, 3))
+        month      = _safe_str(_cell(ss, 8,  3))
+        year       = _safe_num(_cell(ss, 9,  3))
+        version    = _safe_str(_cell(ss, 1,  1))
+        manual_flg = _safe_str(_cell(ss, 3,  2))
+        it_flg     = _safe_str(_cell(ss, 4,  2))
+        score1     = _cell(ss, 5, 1)
+        score2     = _cell(ss, 6, 1)
+        score3     = _cell(ss, 7, 1)
+        score4     = _cell(ss, 8, 1)
+
+        if hosp_code:
+            hosp_code = hosp_code.upper()
+        else:
+            hosp_code = "UNKNOWN"
+
+        directorate = key_map.get(hosp_code, "")
+        if not directorate:
+            unknown_codes.add(hosp_code)
+            logging.warning(
+                f"Unknown hospital code '{hosp_code}' in {fname} — Directorate blank"
+            )
+
+        # ── OR KPI 1-4 & 6 Manual ─────────────────────────────────────────────
+        utilization_m   = None
+        elective_vol_m  = None
+        emergency_vol_m = None
+
+        if kpi_manual_name and kpi_manual_name in wb.sheetnames:
+            km = wb[kpi_manual_name]
+            utilization_m   = _safe_num(_cell(km, 2, 60))   # BH2
+            elective_vol_m  = _safe_num(_cell(km, 2, 64))   # BL2
+            emergency_vol_m = _safe_num(_cell(km, 2, 66))   # BN2
+        else:
+            logging.warning(f"KPI Manual sheet not found in {fname}")
+
+        # ── OR KPI 1-4 & 6 IT ─────────────────────────────────────────────────
+        utilization_it   = None
+        cancellation_it  = None
+        elective_vol_it  = None
+        emergency_vol_it = None
+
+        if kpi_it_name and kpi_it_name in wb.sheetnames:
+            ki = wb[kpi_it_name]
+            utilization_it   = _safe_num(_cell(ki, 3, 27))  # AA3
+            cancellation_it  = _safe_num(_cell(ki, 3, 28))  # AB3
+            elective_vol_it  = _safe_num(_cell(ki, 3, 21))  # U3
+            emergency_vol_it = _safe_num(_cell(ki, 3, 22))  # V3
+        else:
+            logging.warning(f"KPI IT sheet not found in {fname}")
+
+        # ── OR Waiting Time ────────────────────────────────────────────────────
+        func_or  = None
+        nfunc_or = None
+        em_or    = None
+
+        if waiting_time_name and waiting_time_name in wb.sheetnames:
+            wt = wb[waiting_time_name]
+            func_or  = _safe_num(_cell(wt, 3, 17))   # Q3
+            nfunc_or = _safe_num(_cell(wt, 3, 18))   # R3
+            em_or    = _safe_num(_cell(wt, 3, 19))   # S3
+        else:
+            logging.warning(f"OR Waiting Time sheet not found in {fname}")
+
+        wb.close()
+
+        row = {
+            "Directorate":                     directorate,
+            "Hospital Code":                   hosp_code,
+            "Hospital Name":                   hosp_name,
+            "Month":                           month,
+            "Year":                            year,
+            "Version":                         version,
+            "Manual":                          manual_flg,
+            "IT":                              it_flg,
+            "Score1":                          score1,
+            "Score2":                          score2,
+            "Score3":                          score3,
+            "Score4":                          score4,
+            "OR Utilization":                  utilization_m,
+            "Elective surgery Volume Manual":  elective_vol_m,
+            "Emergency Surgery Volume Manual": emergency_vol_m,
+            "Or Utilization IT":               utilization_it,
+            "Surgical Cancellation IT":        cancellation_it,
+            "Number of Non-Em Func OR WT":     func_or,
+            "Number of Non-Func OR WT":        nfunc_or,
+            "Number of Em OR WT":              em_or,
+            "Elective surgery Volume IT":      elective_vol_it,
+            "Emergency Surgery Volume IT":     emergency_vol_it,
+            # Reconciled: take IT if IT > Manual (or Manual is None)
+            "Elective Surgery Volume (Reconciled)": (
+                elective_vol_it
+                if (elective_vol_m is not None and elective_vol_it is not None
+                    and elective_vol_m < elective_vol_it)
+                else (elective_vol_it if elective_vol_m is None else elective_vol_m)
+            ),
+            "Emergency Surgery Volume (Reconciled)": (
+                emergency_vol_it
+                if (emergency_vol_m is not None and emergency_vol_it is not None
+                    and emergency_vol_m < emergency_vol_it)
+                else (emergency_vol_it if emergency_vol_m is None else emergency_vol_m)
+            ),
+        }
+
+        label = directorate if directorate else "NO DIRECTORATE"
+        msg = f"  OK  {fname}: {hosp_code} ({label}) — score row"
+        logging.info(msg)
+        print(msg)
+        return row
+
+    except Exception as e:
+        msg = f"  ERR {fname}: {e}"
+        logging.error(msg)
+        print(msg)
+        return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FOLDER AGGREGATION
+# ══════════════════════════════════════════════════════════════════════════════
+
+def aggregate_folder(
+    folder_path: str,
+    key_map: dict,
+    name_map: dict = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, set]:
+    """
+    Scan folder, process all valid OR data collector files.
+
+    Returns
+    -------
+    spec_df      : DataFrame with SPEC_OUTPUT_COLS  (Specialty Level Data)
+    score_df     : DataFrame with SCORE_OUTPUT_COLS (Score)
+    unknown_codes: set of hospital codes not found in key_map
+    """
+    spec_rows     = []
+    score_rows    = []
+    unknown_codes = set()
+
+    files = sorted([
+        f for f in os.listdir(folder_path)
+        if f.endswith((".xlsx", ".xlsm")) and not f.startswith("~$")
+    ])
+
+    msg = f"\nFound {len(files)} Excel file(s) in folder. Scanning...\n"
+    logging.info(msg)
+    print(msg)
+
+    for fname in files:
+        fpath = os.path.join(folder_path, fname)
+
+        # ── Specialty Level Data ───────────────────────────────────────────────
+        ok_spec, _ = is_or_data_file(fpath)
+        if ok_spec:
+            rows = process_spec_file(fpath, key_map, unknown_codes, name_map=name_map)
+            spec_rows.extend(rows)
+        else:
+            logging.info(f"  --  {fname}: skipped for Specialty sheet")
+            print(f"  --  {fname}: skipped for Specialty sheet")
+
+        # ── Score ──────────────────────────────────────────────────────────────
+        ok_score, _ = is_or_score_file(fpath)
+        if ok_score:
+            row = process_score_file(fpath, key_map, unknown_codes)
+            if row is not None:
+                score_rows.append(row)
+        else:
+            logging.info(f"  --  {fname}: skipped for Score sheet")
+
+    spec_df = (
+        pd.DataFrame(spec_rows, columns=SPEC_OUTPUT_COLS)
+        if spec_rows
+        else pd.DataFrame(columns=SPEC_OUTPUT_COLS)
+    )
+    score_df = (
+        pd.DataFrame(score_rows, columns=SCORE_OUTPUT_COLS)
+        if score_rows
+        else pd.DataFrame(columns=SCORE_OUTPUT_COLS)
     )
 
-    def style_hl(df_styled):
-        styles = pd.DataFrame("", index=df_styled.index, columns=df_styled.columns)
-        last_idx = df_styled.index[-1]
-        styles.loc[last_idx, :] = "background-color:#1D9E75;color:white;font-weight:700;"
+    return spec_df, score_df, unknown_codes
 
-        for col in df_styled.columns:
-            if col.endswith("— %"):
-                for idx in df_styled.index[:-1]:
-                    val = df_styled.loc[idx, col]
-                    try:
-                        v = float(str(val).replace("%", ""))
-                        if v >= 100:
-                            styles.loc[idx, col] = "background-color:#d4edda;color:#155724;"
-                        elif v >= 50:
-                            styles.loc[idx, col] = "background-color:#fff3cd;color:#856404;"
-                        else:
-                            styles.loc[idx, col] = "background-color:#f8d7da;color:#721c24;"
-                    except Exception:
-                        pass
-        return styles
 
-    styled_hl = pivot_df.style.apply(style_hl, axis=None)
-    st.dataframe(styled_hl, use_container_width=True, height=600)
+# ══════════════════════════════════════════════════════════════════════════════
+# OUTPUT — WRITE BOTH SHEETS TO ONE WORKBOOK
+# ══════════════════════════════════════════════════════════════════════════════
 
-    st.markdown("---")
-    csv_data = pivot_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="Download High Level Table as CSV",
-        data=csv_data,
-        file_name="high_level_table.csv",
-        mime="text/csv",
+def _style_sheet(ws, df: pd.DataFrame, col_widths: list[int]) -> None:
+    """Apply header + alternating-row styling to a worksheet."""
+    hdr_fill = PatternFill("solid", start_color="1F4E79")
+    hdr_font = Font(bold=True, color="FFFFFF", name="Arial", size=9)
+    for cell in ws[1]:
+        cell.fill      = hdr_fill
+        cell.font      = hdr_font
+        cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+    ws.row_dimensions[1].height = 55
+
+    for i, w in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    data_font = Font(name="Arial", size=9)
+    alt_fill  = PatternFill("solid", start_color="EBF3FB")
+    for row_num in range(2, len(df) + 2):
+        for col_num in range(1, len(df.columns) + 1):
+            cell           = ws.cell(row=row_num, column=col_num)
+            cell.font      = data_font
+            cell.alignment = Alignment(vertical="center")
+            if row_num % 2 == 0:
+                cell.fill = alt_fill
+
+    ws.freeze_panes    = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+
+def write_output(
+    spec_df:  pd.DataFrame,
+    score_df: pd.DataFrame,
+    key_df:   pd.DataFrame | None,
+    output_path: str,
+) -> None:
+    """Write both DataFrames to a single Excel workbook with two data sheets."""
+    print(f"\nWriting output to: {output_path}")
+    logging.info(
+        f"Writing {len(spec_df)} specialty rows and {len(score_df)} score rows to {output_path}"
     )
+
+    with pd.ExcelWriter(
+        output_path, engine="openpyxl", datetime_format="DD-MMM-YYYY"
+    ) as writer:
+        # Sheet 1 — Specialty Level Data
+        spec_df.to_excel(writer, sheet_name="Specialty Level Data", index=False)
+
+        # Sheet 2 — Score
+        score_df.to_excel(writer, sheet_name="Score", index=False)
+
+        # Sheet 3 — Key (optional reference)
+        if key_df is not None and len(key_df) > 0:
+            key_df.to_excel(writer, sheet_name="Key", index=False)
+
+        wb = writer.book
+
+        # Style Sheet 1
+        spec_widths = [22, 14, 32, 14, 28, 12, 10, 10, 10, 10, 10, 8, 8, 10, 10, 10, 14, 14, 10, 15, 10, 10, 10]
+        _style_sheet(wb["Specialty Level Data"], spec_df, spec_widths)
+
+        # Style Sheet 2
+        score_widths = [22, 14, 30, 12, 8, 28, 8, 8, 10, 10, 10, 10, 14, 16, 18, 14, 18, 20, 18, 14, 18, 20, 18, 20]
+        _style_sheet(wb["Score"], score_df, score_widths)
+
+
+def write_unknown_hospitals(unknown_codes: set, output_path: str) -> None:
+    if not unknown_codes:
+        return
+    unknown_path = os.path.splitext(output_path)[0] + "_UNKNOWN_HOSPITALS.txt"
+    with open(unknown_path, "w") as f:
+        f.write("Hospital codes not found in the Key table\n")
+        f.write("=" * 45 + "\n")
+        f.write("These hospitals will have a blank Directorate in the output.\n")
+        f.write("Add them to the _EMBEDDED_KEY_TSV block in or_aggregator.py.\n\n")
+        for code in sorted(unknown_codes):
+            f.write(f"  {code}\n")
+    print(f"\n  UNKNOWN HOSPITALS written to: {unknown_path}")
+    logging.warning(f"Unknown hospitals file: {unknown_path}")
+
+
+def print_summary(
+    spec_df: pd.DataFrame,
+    score_df: pd.DataFrame,
+    unknown_codes: set,
+    output_path: str,
+) -> None:
+    spec_filled  = (spec_df["Directorate"].notna() & (spec_df["Directorate"] != "")).sum()
+    score_filled = (score_df["Directorate"].notna() & (score_df["Directorate"] != "")).sum() if len(score_df) else 0
+    lines = [
+        "=" * 60,
+        f"  [Sheet 1 — Specialty Level Data]",
+        f"    Rows written        : {len(spec_df):,}",
+        f"    Hospitals processed : {spec_df['Hospital Code'].nunique() if len(spec_df) else 0}",
+        f"    Directorates filled : {spec_filled:,} / {len(spec_df):,} rows",
+        f"  [Sheet 2 — Score]",
+        f"    Rows written        : {len(score_df):,}",
+        f"    Hospitals processed : {score_df['Hospital Code'].nunique() if len(score_df) else 0}",
+        f"    Directorates filled : {score_filled:,} / {len(score_df):,} rows",
+    ]
+    if unknown_codes:
+        lines.append(f"  UNKNOWN hospitals   : {sorted(unknown_codes)}")
+    lines += [f"  Saved to            : {output_path}", "=" * 60]
+    summary = "\n".join(lines)
+    print("\n" + summary)
+    logging.info("\n" + summary)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "OR Aggregator — processes OR data collector files and produces a single "
+            "Excel workbook with two sheets: 'Specialty Level Data' and 'Score'."
+        )
+    )
+    parser.add_argument("--input",  "-i", help="Folder containing raw OR data collector files")
+    parser.add_argument(
+        "--output", "-o", default="OR_Aggregated.xlsx",
+        help="Output Excel file (default: OR_Aggregated.xlsx)"
+    )
+    parser.add_argument(
+        "--key", "-k",
+        help="(Optional) Excel file with a Key sheet to override the built-in mapping"
+    )
+    args = parser.parse_args()
+
+    # ── Resolve input folder ──────────────────────────────────────────────────
+    folder = args.input
+    if not folder:
+        folder = input("Enter the folder path containing OR data files:\n> ").strip().strip('"\'')
+    if not os.path.isdir(folder):
+        print(f"Error: folder not found: {folder}")
+        sys.exit(1)
+
+    output_path = args.output
+    if not output_path.endswith(".xlsx"):
+        output_path += ".xlsx"
+
+    # ── Run log ───────────────────────────────────────────────────────────────
+    log_path = os.path.splitext(output_path)[0] + "_run_log.txt"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_path, mode="w", encoding="utf-8"),
+        ],
+    )
+    logging.info("OR Aggregator started")
+    logging.info(f"Input folder : {folder}")
+    logging.info(f"Output file  : {output_path}")
+
+    # ── Key table ─────────────────────────────────────────────────────────────
+    key_map, key_df = get_embedded_key()
+    print(f"\nBuilt-in Key table loaded: {len(key_map)} hospitals across 21 directorates")
+    logging.info(f"Embedded key: {len(key_map)} hospitals")
+
+    ext_map, ext_df = load_key_from_file(key_path=args.key, search_folder=folder)
+    if ext_map:
+        key_map.update(ext_map)
+        key_df = ext_df
+        print(f"  External key merged — total {len(key_map)} hospital mappings")
+
+    # ── Hospital name map ─────────────────────────────────────────────────────
+    name_map = get_hospital_name_map()
+    print(f"  Hospital name map loaded: {len(name_map)} entries")
+    logging.info(f"Hospital name map: {len(name_map)} entries")
+
+    # ── Process all files ─────────────────────────────────────────────────────
+    spec_df, score_df, unknown_codes = aggregate_folder(folder, key_map, name_map=name_map)
+
+    if spec_df.empty and score_df.empty:
+        print("Nothing to write. Exiting.")
+        sys.exit(0)
+
+    # ── Write output ──────────────────────────────────────────────────────────
+    write_output(spec_df, score_df, key_df, output_path)
+    write_unknown_hospitals(unknown_codes, output_path)
+    print_summary(spec_df, score_df, unknown_codes, output_path)
+
+    logging.info("Run completed successfully")
+    print(f"\n  Run log saved to: {log_path}")
+    print("\nDone!")
+
+
+if __name__ == "__main__":
+    main()
